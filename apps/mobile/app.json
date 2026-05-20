@@ -15,10 +15,20 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.yu23ki14.envsense"
+      "bundleIdentifier": "com.yu23ki14.envsense",
+      "infoPlist": {
+        "UIBackgroundModes": ["bluetooth-central"]
+      }
     },
     "android": {
       "package": "com.yu23ki14.envsense",
+      "permissions": [
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -29,6 +39,16 @@
     "web": {
       "favicon": "./assets/favicon.png"
     },
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": ["central"],
+          "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to the envsense device."
+        }
+      ]
+    ],
     "extra": {
       "eas": {
         "projectId": "cf6052c0-83b5-4044-addf-ba1a4609f62b"

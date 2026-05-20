@@ -12,13 +12,17 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~55.0.25",
     "expo-status-bar": "~55.0.6",
     "react": "19.2.0",
-    "react-native": "0.83.6"
+    "react-native": "0.83.6",
+    "react-native-ble-plx": "^3.5.0",
+    "react-native-quick-base64": "^2.2.0"
   },
   "devDependencies": {
     "@types/react": "~19.2.0",
+    "@types/web-bluetooth": "^0.0.20",
     "eas-cli": "^19.0.1",
     "typescript": "~5.9.2"
   }
