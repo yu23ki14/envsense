@@ -1,0 +1,13 @@
+packages:
+  - "apps/*"
+
+# Metro / React Native autolinking do not fully support pnpm's symlinked
+# node_modules layout, so dependencies are installed in a flat (hoisted) tree.
+# https://docs.expo.dev/guides/monorepos/
+nodeLinker: hoisted
+
+# pnpm only runs install/build scripts for dependencies on this allow-list.
+onlyBuiltDependencies:
+  - "@biomejs/biome"
+  - esbuild
+  - lefthook

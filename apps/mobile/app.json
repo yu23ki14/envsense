@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "envsense",
+    "slug": "envsense",
+    "scheme": "envsense",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.yu23ki14.envsense"
+    },
+    "android": {
+      "package": "com.yu23ki14.envsense",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "cf6052c0-83b5-4044-addf-ba1a4609f62b"
+      }
+    },
+    "owner": "yu23ki14"
+  }
+}

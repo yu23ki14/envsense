@@ -1,0 +1,27 @@
+{
+  "name": "envsense",
+  "version": "0.0.0",
+  "private": true,
+  "description": "envsense — wearable environment-sensing device (omiGlass-derived). pnpm monorepo for the Expo mobile app, ESP32 firmware, and clip hardware.",
+  "license": "MIT",
+  "packageManager": "pnpm@10.18.3",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "mobile": "pnpm --filter @envsense/mobile",
+    "start": "pnpm --filter @envsense/mobile start",
+    "ios": "pnpm --filter @envsense/mobile ios",
+    "android": "pnpm --filter @envsense/mobile android",
+    "web": "pnpm --filter @envsense/mobile web",
+    "typecheck": "pnpm --filter @envsense/mobile typecheck",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "check": "biome check --write .",
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.15",
+    "lefthook": "2.1.8"
+  }
+}
