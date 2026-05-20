@@ -26,8 +26,21 @@ board: `seeed_xiao_esp32s3` / framework: `arduino` / memory type: `qio_opi`（PS
 
 ## 前提
 
-- [PlatformIO Core](https://platformio.org/install)（`pip install platformio`）
+- [PlatformIO Core](https://platformio.org/install)
 - XIAO ESP32S3 Sense を USB-C で接続
+
+### PlatformIO Core のインストール
+
+`pip install platformio` を共有 Python 環境（pyenv の global など）へ直接入れると
+依存パッケージが衝突しやすい。**専用 venv に隔離**してインストールする:
+
+```bash
+python3 -m venv ~/.platformio/penv
+~/.platformio/penv/bin/pip install platformio
+ln -s ~/.platformio/penv/bin/pio ~/.local/bin/pio   # ~/.local/bin が PATH 上にある前提
+```
+
+`pipx install platformio` でも可。`pio --version` が通れば OK。
 
 ## ブートローダーモードへの入り方
 
