@@ -19,7 +19,8 @@
     "react": "19.2.0",
     "react-native": "0.83.6",
     "react-native-ble-plx": "^3.5.0",
-    "react-native-quick-base64": "^2.2.0"
+    "react-native-quick-base64": "^2.2.0",
+    "react-native-typography": "^1.4.1"
   },
   "devDependencies": {
     "@types/react": "~19.2.0",
