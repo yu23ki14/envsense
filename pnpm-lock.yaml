@@ -17,6 +17,9 @@ importers:
 
   apps/mobile:
     dependencies:
+      '@expo-google-fonts/noto-sans-jp':
+        specifier: ^0.4.3
+        version: 0.4.3
       '@react-native-async-storage/async-storage':
         specifier: 2.2.0
         version: 2.2.0(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))
@@ -26,6 +29,12 @@ importers:
       expo-file-system:
         specifier: ~55.0.21
         version: 55.0.21(expo@55.0.25)(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))
+      expo-font:
+        specifier: ~55.0.8
+        version: 55.0.8(expo@55.0.25)(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
+      expo-splash-screen:
+        specifier: ~55.0.21
+        version: 55.0.21(expo@55.0.25)(typescript@5.9.3)
       expo-status-bar:
         specifier: ~55.0.6
         version: 55.0.6(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
@@ -38,12 +47,18 @@ importers:
       react-native-ble-plx:
         specifier: ^3.5.0
         version: 3.5.1(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
+      react-native-edge-to-edge:
+        specifier: ^1.8.1
+        version: 1.8.1(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
+      react-native-nitro-modules:
+        specifier: ^0.35.7
+        version: 0.35.7(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
       react-native-quick-base64:
         specifier: ^2.2.0
         version: 2.2.2(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
-      react-native-typography:
-        specifier: ^1.4.1
-        version: 1.4.1(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
+      react-native-unistyles:
+        specifier: ^3.2.4
+        version: 3.2.4(@react-native/normalize-colors@0.83.6)(react-native-edge-to-edge@1.8.1(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0))(react-native-nitro-modules@0.35.7(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0))(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
     devDependencies:
       '@digital-go-jp/design-tokens':
         specifier: ^1.1.9
@@ -790,6 +805,9 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@expo-google-fonts/noto-sans-jp@0.4.3':
+    resolution: {integrity: sha512-Fl+Z6vtD24HFAYsvzB0S9Nery1ly16B9PesdY0wBd+wEHAvkNglnkTUspU0HqGOubkmoa8zusJrKv6vDx1o70A==}
 
   '@expo/apple-utils@2.1.19':
     resolution: {integrity: sha512-f1iMteL+tTOSF1sovVB35ncobdiZvhjWvwEOWGIuAutyeIpcxNJ/2tUZSE748X/VEQLn1cL2Tozkdp2MLXStvA==}
@@ -2039,6 +2057,11 @@ packages:
     resolution: {integrity: sha512-EcCiV902fTP45fbzbZE0VJEqQ50a3mxnKKAccg2RoQGddTJisePh+QREaoeliyT45s8BiF0TworWKyImqzsdhg==}
     engines: {node: '>=20.16.0'}
 
+  expo-splash-screen@55.0.21:
+    resolution: {integrity: sha512-hFGEap69ggCckbHIdDXMe5rqfBR9TwcnY5gBhyaACUxU64w827T6prOQcIvLmAdv00kp3Gqt7hgE+mNn37EF+A==}
+    peerDependencies:
+      expo: '*'
+
   expo-status-bar@55.0.6:
     resolution: {integrity: sha512-ijOUptfdiqYt7rObZ6jrPQ8sE5YN/8MxKCIJx0b7TY4nGkSJxhPIxeoW4GXcXCA8mTQ9PiOHH/ThLZgRVZvUlQ==}
     peerDependencies:
@@ -3161,8 +3184,20 @@ packages:
       react: '*'
       react-native: '*'
 
+  react-native-edge-to-edge@1.8.1:
+    resolution: {integrity: sha512-bhvsKqeX9PGkY9wBUk9vni/tJNJdKtLPbs/j3e/3CdV4JmUWfTXYYoL+4Hc8Wmej+5eJxkc8KOFa454ruFWBCA==}
+    peerDependencies:
+      react: '*'
+      react-native: '*'
+
   react-native-is-edge-to-edge@1.3.1:
     resolution: {integrity: sha512-NIXU/iT5+ORyCc7p0z2nnlkouYKX425vuU1OEm6bMMtWWR9yvb+Xg5AZmImTKoF9abxCPqrKC3rOZsKzUYgYZA==}
+    peerDependencies:
+      react: '*'
+      react-native: '*'
+
+  react-native-nitro-modules@0.35.7:
+    resolution: {integrity: sha512-3EiU27EmnxTlD3pAXR2OBWeDg7+9tdjKrNQOPX08rFX5hJPNIT/h1i2PjvTUieOypCGTEi9nW/SNBtK3F+4HYg==}
     peerDependencies:
       react: '*'
       react-native: '*'
@@ -3173,11 +3208,21 @@ packages:
       react: '*'
       react-native: '*'
 
-  react-native-typography@1.4.1:
-    resolution: {integrity: sha512-dc9Zfs4jUdq4ygx4/KwO6jKTERBu6cRrfPJGntw/pA+D6BMjlWfMNuhZ/69vf4Zpsnt9s4AGe+Z/V1QFYaCXAA==}
+  react-native-unistyles@3.2.4:
+    resolution: {integrity: sha512-S0aXJKZ6zYUViKMol+3on707AWD71fnAM7kmcHjk3FALy5QJicCCzxuluR0IptFQYNUP2dRqnnhgoS1X/U6Jpw==}
+    engines: {node: '>= 20.18.0'}
     peerDependencies:
+      '@react-native/normalize-colors': '*'
       react: '*'
-      react-native: '*'
+      react-native: '>=0.76.0'
+      react-native-edge-to-edge: '*'
+      react-native-nitro-modules: '*'
+      react-native-reanimated: '*'
+    peerDependenciesMeta:
+      react-native-edge-to-edge:
+        optional: true
+      react-native-reanimated:
+        optional: true
 
   react-native@0.83.6:
     resolution: {integrity: sha512-H513+8VzviNFXOdPnStRzX9S3/jiJGg++QZ1zd+ROyAvBEKqFqKUPHH0d82y3QyRPct5qKjdOa7J6vNehCvXYA==}
@@ -4527,6 +4572,8 @@ snapshots:
 
   '@esbuild/win32-x64@0.28.0':
     optional: true
+
+  '@expo-google-fonts/noto-sans-jp@0.4.3': {}
 
   '@expo/apple-utils@2.1.19': {}
 
@@ -6368,6 +6415,14 @@ snapshots:
 
   expo-server@55.0.10: {}
 
+  expo-splash-screen@55.0.21(expo@55.0.25)(typescript@5.9.3):
+    dependencies:
+      '@expo/prebuild-config': 55.0.18(expo@55.0.25)(typescript@5.9.3)
+      expo: 55.0.25(@babel/core@7.29.0)(@expo/dom-webview@55.0.6)(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)(typescript@5.9.3)
+    transitivePeerDependencies:
+      - supports-color
+      - typescript
+
   expo-status-bar@55.0.6(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0):
     dependencies:
       react: 19.2.0
@@ -7579,7 +7634,17 @@ snapshots:
       react: 19.2.0
       react-native: 0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0)
 
+  react-native-edge-to-edge@1.8.1(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0):
+    dependencies:
+      react: 19.2.0
+      react-native: 0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0)
+
   react-native-is-edge-to-edge@1.3.1(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0):
+    dependencies:
+      react: 19.2.0
+      react-native: 0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0)
+
+  react-native-nitro-modules@0.35.7(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0):
     dependencies:
       react: 19.2.0
       react-native: 0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0)
@@ -7589,10 +7654,15 @@ snapshots:
       react: 19.2.0
       react-native: 0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0)
 
-  react-native-typography@1.4.1(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0):
+  react-native-unistyles@3.2.4(@react-native/normalize-colors@0.83.6)(react-native-edge-to-edge@1.8.1(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0))(react-native-nitro-modules@0.35.7(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0))(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0):
     dependencies:
+      '@babel/types': 7.29.0
+      '@react-native/normalize-colors': 0.83.6
       react: 19.2.0
       react-native: 0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0)
+      react-native-nitro-modules: 0.35.7(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
+    optionalDependencies:
+      react-native-edge-to-edge: 1.8.1(react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0))(react@19.2.0)
 
   react-native@0.83.6(@babel/core@7.29.0)(@types/react@19.2.15)(react@19.2.0):
     dependencies:

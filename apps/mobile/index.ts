@@ -1,3 +1,6 @@
+// Unistyles の設定を最優先で実行する（あらゆる StyleSheet.create より前）
+import './src/ui/unistyles';
+
 import { registerRootComponent } from 'expo';
 
 import App from './App';

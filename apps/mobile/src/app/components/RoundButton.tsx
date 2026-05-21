@@ -8,7 +8,6 @@ import {
   View,
   type ViewStyle,
 } from 'react-native';
-import { iOSUIKit } from 'react-native-typography';
 import { Theme } from './theme';
 
 export type RoundButtonSize = 'large' | 'normal' | 'small';
@@ -106,7 +105,6 @@ export const RoundButton = React.memo((props: RoundButtonProps) => {
         )}
         <Text
           style={[
-            iOSUIKit.title3,
             {
               marginTop: size.pad,
               opacity: doLoading ? 0 : 1,

@@ -13,15 +13,20 @@
     "tokens": "tsx scripts/build-tokens.ts"
   },
   "dependencies": {
+    "@expo-google-fonts/noto-sans-jp": "^0.4.3",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~55.0.25",
     "expo-file-system": "~55.0.21",
+    "expo-font": "~55.0.8",
+    "expo-splash-screen": "~55.0.21",
     "expo-status-bar": "~55.0.6",
     "react": "19.2.0",
     "react-native": "0.83.6",
     "react-native-ble-plx": "^3.5.0",
+    "react-native-edge-to-edge": "^1.8.1",
+    "react-native-nitro-modules": "^0.35.7",
     "react-native-quick-base64": "^2.2.0",
-    "react-native-typography": "^1.4.1"
+    "react-native-unistyles": "^3.2.4"
   },
   "devDependencies": {
     "@digital-go-jp/design-tokens": "^1.1.9",

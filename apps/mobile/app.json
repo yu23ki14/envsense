@@ -47,7 +47,9 @@
           "modes": ["central"],
           "bluetoothAlwaysPermission": "Allow $(PRODUCT_NAME) to connect to the envsense device."
         }
-      ]
+      ],
+      "react-native-edge-to-edge",
+      "expo-font"
     ],
     "extra": {
       "eas": {
