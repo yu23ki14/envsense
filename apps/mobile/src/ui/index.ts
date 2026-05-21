@@ -4,3 +4,4 @@
  */
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from './components/Button';
 export { Text, type TextProps } from './components/Text';
+export { TextField, type TextFieldProps } from './components/TextField';
