@@ -10,7 +10,8 @@
     "web": "expo start --web",
     "eas": "eas",
     "typecheck": "tsc --noEmit",
-    "tokens": "tsx scripts/build-tokens.ts"
+    "tokens": "tsx scripts/build-tokens.ts",
+    "check:colors": "node scripts/check-no-color-literals.mjs"
   },
   "dependencies": {
     "@expo-google-fonts/noto-sans-jp": "^0.4.3",
