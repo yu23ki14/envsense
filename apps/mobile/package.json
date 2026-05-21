@@ -9,7 +9,8 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "eas": "eas",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "tokens": "tsx scripts/build-tokens.ts"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
@@ -23,9 +24,11 @@
     "react-native-typography": "^1.4.1"
   },
   "devDependencies": {
+    "@digital-go-jp/design-tokens": "^1.1.9",
     "@types/react": "~19.2.0",
     "@types/web-bluetooth": "^0.0.20",
     "eas-cli": "^19.0.1",
+    "tsx": "^4.22.3",
     "typescript": "~5.9.2"
   }
 }

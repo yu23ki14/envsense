@@ -3,5 +3,5 @@
   "compilerOptions": {
     "strict": true
   },
-  "exclude": ["node_modules", "prompts"]
+  "exclude": ["node_modules", "prompts", "scripts"]
 }
