@@ -1,8 +1,8 @@
 import * as React from 'react';
-import { SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView, View } from 'react-native';
+import { StyleSheet } from 'react-native-unistyles';
 import { useDevice } from '../modules/useDevice';
-import { RoundButton } from './components/RoundButton';
-import { Theme } from './components/theme';
+import { Button, Text } from '../ui';
 import { DeviceView } from './DeviceView';
 
 export const Main = React.memo(() => {
@@ -16,15 +16,15 @@ export const Main = React.memo(() => {
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.screen}>
       {!device && (
-        <View
-          style={{ flex: 1, justifyContent: 'center', alignItems: 'center', alignSelf: 'center' }}
-        >
+        <View style={styles.connect}>
           {statusText ? (
-            <Text style={styles.statusText}>{statusText}</Text>
+            <Text variant="body" color="textMuted">
+              {statusText}
+            </Text>
           ) : (
-            <RoundButton title="Connect to the device" action={connectDevice} />
+            <Button onPress={connectDevice}>Connect to the device</Button>
           )}
         </View>
       )}
@@ -33,16 +33,17 @@ export const Main = React.memo(() => {
   );
 });
 
-const styles = StyleSheet.create({
-  container: {
+const styles = StyleSheet.create((theme) => ({
+  screen: {
     flex: 1,
-    backgroundColor: Theme.background,
-    alignItems: 'stretch',
+    backgroundColor: theme.colors.background,
     justifyContent: 'center',
   },
-  statusText: {
-    color: Theme.text,
-    fontSize: 18,
-    marginBottom: 16,
+  connect: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: theme.spacing.lg,
+    padding: theme.spacing.lg,
   },
-});
+}));
