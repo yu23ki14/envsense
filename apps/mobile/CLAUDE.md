@@ -21,15 +21,27 @@ From the repo root use `pnpm mobile <script>`; from this directory use `pnpm <sc
 
 ## Startup ordering constraint
 
-The entry point is `index.ts` → `App`. `index.ts` imports `src/ui/unistyles` **before anything
-else**, because Unistyles' `StyleSheet.configure` must run before any `StyleSheet.create` call.
-Breaking this import order crashes the app with an unconfigured theme.
+The entry point is `index.ts`. It imports `src/ui/unistyles` **before anything else** and then
+`expo-router/entry`, because Unistyles' `StyleSheet.configure` must run before any
+`StyleSheet.create` call. Keep this import order — breaking it crashes the app with an
+unconfigured theme.
 
-## Screen flow
+## Navigation & screen structure
 
-`Main.tsx` manages the BLE connection via `useDevice()` and renders `DeviceView` once connected.
-`useDevice` saves the last-connected device ID to AsyncStorage and tries to auto-reconnect on
-startup (falling back to a manual scan on failure).
+Navigation uses **expo-router** (file-based routing). Routes live in `app/`:
+
+- `app/_layout.tsx` — root Stack: font loading + splash, plus the `(tabs)` group and the
+  `journal` / `export` modal routes.
+- `app/(tabs)/` — bottom tab navigation (今日 / 記録 / デバイス). The tab bar is the custom
+  `src/components/ClipTabBar`.
+- Shared shell components live in `src/components/` (built on the `src/ui` design system);
+  screen bodies will live in `src/screens/` (added per screen).
+
+Keep route files in `app/` thin — the Unistyles babel plugin only transforms files under `src`
+(see `babel.config.js`), so put styled components in `src/` and have routes just compose them.
+
+The legacy omiGlass UI (BLE connect screen + `DeviceView`) is parked in `src/legacy/`, pending
+re-integration into the new screens by the device-integration work.
 
 ## BLE layer (`src/modules/ble/`)
 
@@ -44,10 +56,10 @@ The UUIDs and packet formats must match the firmware (`firmware/src/config.h`).
 
 ## Device integration pipeline
 
-- **Photos**: `DeviceView` subscribes to the envsense GATT service's photo characteristics and
-  reassembles the chunked JPEG (writing to the photo-control characteristic triggers automatic
-  capture every 5 seconds). Image rotation behavior depends on the firmware version (see
-  `compareVersions`).
+- **Photos**: `src/legacy/DeviceView` subscribes to the envsense GATT service's photo
+  characteristics and reassembles the chunked JPEG (writing to the photo-control characteristic
+  triggers automatic capture every 5 seconds). Image rotation behavior depends on the firmware
+  version (see `compareVersions`).
 - **Transcription**: `useTranscripts` subscribes to the Opus audio stream and sends ~10-second
   segments to Groq Whisper wrapped as Ogg/Opus. There is no WASM Opus decoder — only Ogg wrapping
   — so the same path works on web and native.
