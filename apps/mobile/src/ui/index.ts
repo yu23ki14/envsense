@@ -4,6 +4,7 @@
  */
 export { Button, type ButtonProps, type ButtonSize, type ButtonVariant } from './components/Button';
 export { Checkbox, type CheckboxProps } from './components/Checkbox';
+export { Icon, type IconName, type IconProps } from './components/Icon';
 export {
   Radio,
   RadioGroup,

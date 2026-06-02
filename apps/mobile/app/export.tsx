@@ -1,7 +1,5 @@
-import { ModalPlaceholder } from '../src/components';
+import { ExportScreen } from '../src/screens';
 
 export default function ExportRoute() {
-  return (
-    <ModalPlaceholder title="エクスポート" description="記録の書き出し設定がここに表示されます。" />
-  );
+  return <ExportScreen />;
 }

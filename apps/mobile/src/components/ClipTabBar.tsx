@@ -5,21 +5,18 @@
  * 描画される。ルート名（index / record / device）からラベルとアイコンを引く。
  */
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
-import { Cpu, House, List } from 'lucide-react-native';
-import type { ComponentType } from 'react';
 import { Pressable, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { Text } from '../ui';
+import { Icon, type IconName, Text } from '../ui';
 
-type IconProps = { size?: number; color?: string };
-type TabMeta = { label: string; Icon: ComponentType<IconProps> };
+type TabMeta = { label: string; icon: IconName };
 
 /** ルート名 → タブのラベルとアイコン。 */
 const TAB_META: Record<string, TabMeta> = {
-  index: { label: '今日', Icon: House },
-  record: { label: '記録', Icon: List },
-  device: { label: 'デバイス', Icon: Cpu },
+  index: { label: '今日', icon: 'home' },
+  record: { label: '記録', icon: 'record' },
+  device: { label: 'デバイス', icon: 'device' },
 };
 
 export function ClipTabBar({ state, navigation }: BottomTabBarProps) {
@@ -34,8 +31,7 @@ export function ClipTabBar({ state, navigation }: BottomTabBarProps) {
           return null;
         }
         const focused = state.index === index;
-        const color = focused ? theme.colors.primary : theme.colors.textMuted;
-        const { Icon } = meta;
+        const tone = focused ? 'primary' : 'textMuted';
 
         const onPress = () => {
           const event = navigation.emit({
@@ -56,8 +52,8 @@ export function ClipTabBar({ state, navigation }: BottomTabBarProps) {
             onPress={onPress}
             style={styles.item}
           >
-            <Icon size={22} color={color} />
-            <Text variant="caption" style={{ color }}>
+            <Icon name={meta.icon} size={22} color={tone} />
+            <Text variant="caption" style={{ color: theme.colors[tone] }}>
               {meta.label}
             </Text>
           </Pressable>
