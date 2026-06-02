@@ -50,7 +50,8 @@
       ],
       "react-native-edge-to-edge",
       "expo-font",
-      "expo-router"
+      "expo-router",
+      "expo-secure-store"
     ],
     "extra": {
       "eas": {
