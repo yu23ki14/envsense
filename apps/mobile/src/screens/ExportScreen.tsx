@@ -2,7 +2,7 @@
  * ExportScreen — 「エクスポート」モーダルの本体。
  *
  * 範囲 / 含めるデータ / 形式 / 送り先 を選び、CTA でエクスポートを開始する
- * フォーム。MVP では実処理はないので onPress は no-op。
+ * フォーム。初期値は Settings.export から読み込む。実処理は別 Issue。
  */
 import { router } from 'expo-router';
 import { useState } from 'react';
@@ -16,10 +16,11 @@ import {
   SegmentedControl,
   type SegmentedControlOption,
 } from '../components';
+import type { ExportFormat } from '../data';
+import { useSettings } from '../data';
 import { Button, Checkbox, Icon, RadioGroup, type RadioOption, Text } from '../ui';
 
 type Range = 'today' | 'week' | 'custom';
-type Format = 'zip' | 'json' | 'markdown';
 
 const RANGE_OPTIONS: SegmentedControlOption<Range>[] = [
   { value: 'today', label: '今日' },
@@ -27,19 +28,22 @@ const RANGE_OPTIONS: SegmentedControlOption<Range>[] = [
   { value: 'custom', label: '範囲指定' },
 ];
 
-const FORMAT_OPTIONS: RadioOption<Format>[] = [
+const FORMAT_OPTIONS: RadioOption<ExportFormat>[] = [
   { value: 'zip', label: 'ZIP（写真 + 音声 + テキスト）' },
   { value: 'json', label: 'JSON（メタデータのみ）' },
   { value: 'markdown', label: 'Markdown（テキストのみ）' },
 ];
 
 export function ExportScreen() {
+  const settings = useSettings();
+  const defaults = settings.export;
+
   const [range, setRange] = useState<Range>('today');
-  const [photos, setPhotos] = useState(true);
-  const [audio, setAudio] = useState(true);
-  const [transcripts, setTranscripts] = useState(true);
-  const [summary, setSummary] = useState(false);
-  const [format, setFormat] = useState<Format>('zip');
+  const [photos, setPhotos] = useState(defaults.includes.photos);
+  const [audio, setAudio] = useState(defaults.includes.audio);
+  const [transcripts, setTranscripts] = useState(defaults.includes.transcripts);
+  const [summary, setSummary] = useState(defaults.includes.summary);
+  const [format, setFormat] = useState<ExportFormat>(defaults.format);
 
   return (
     <ModalScreen title="エクスポート" subtitle="記録を書き出す">
@@ -87,7 +91,7 @@ export function ExportScreen() {
             エクスポートを開始
           </Button>
           <Text variant="caption" color="textMuted" style={styles.note}>
-            選択したデータを暗号化された ZIP にまとめてから共有します。
+            選択したデータを ZIP にまとめて共有シートに渡します。
           </Text>
         </View>
       </View>

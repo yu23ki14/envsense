@@ -1,3 +1,4 @@
+export * from './hooks';
 export { dateKey, newId } from './ids';
 export { LATEST_VERSION, runMigrations } from './migrations';
 export * from './repos';

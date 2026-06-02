@@ -2,42 +2,68 @@
  * TodayScreen — 「今日」タブの本体。
  *
  * 今日の活動サマリー、スナップショットグリッド、ハイライト引用、
- * エージェントへの質問 CTA を縦に並べる。MVP のためデータはダミー。
+ * エージェントへの質問 CTA を縦に並べる。今日 (端末ローカル日) の Day
+ * ロールアップを MMKV から読み出して描画する。
  */
+import { format } from 'date-fns';
+import { ja } from 'date-fns/locale/ja';
+import { useMemo } from 'react';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { Card, ClipScreen, PhotoPlaceholder, SectionHeader, Tag } from '../components';
+import type { Highlight, Photo } from '../data';
+import {
+  dateKey,
+  useAudioTotalMsForDay,
+  useDay,
+  useHighlightsForDay,
+  usePhotosForDay,
+} from '../data';
 import { Button, Icon, Text } from '../ui';
 
-const SNAPSHOTS = [
-  { time: '08:14', caption: '朝のコーヒー' },
-  { time: '10:32', caption: 'オフィスに到着' },
-  { time: '13:05', caption: '会議室 B のホワイトボード' },
-  { time: '17:48', caption: '帰り道の桜並木' },
-];
+const SNAPSHOT_LIMIT = 4;
+const HIGHLIGHT_LIMIT = 5;
 
-const HIGHLIGHTS = [
-  {
-    id: 'h1',
-    time: '11:20',
-    quote: '次のリリースのスコープは木曜の MTG で固める。先に粗いドラフトを共有しておくこと。',
-    tags: ['#仕事', '#決定'],
-  },
-  {
-    id: 'h2',
-    time: '15:42',
-    quote: '帰りに本屋に寄ること。Tufte の本が新装版で出ているらしい。',
-    tags: ['#メモ'],
-  },
-];
+function formatClock(ms: number): string {
+  return format(ms, 'HH:mm');
+}
+
+function formatTodayDate(now: number): string {
+  return format(now, 'yyyy 年 M 月 d 日 EEEE', { locale: ja });
+}
+
+function formatDurationFromMs(totalMs: number): string {
+  const minutes = Math.floor(totalMs / 60000);
+  const hours = Math.floor(minutes / 60);
+  const mm = minutes % 60;
+  return `${hours}:${mm.toString().padStart(2, '0')}`;
+}
 
 export function TodayScreen() {
+  const now = useMemo(() => Date.now(), []);
+  const todayKey = useMemo(() => dateKey(now), [now]);
+
+  const day = useDay(todayKey);
+  const photos = usePhotosForDay(todayKey);
+  const highlights = useHighlightsForDay(todayKey);
+  const audioTotalMs = useAudioTotalMsForDay(todayKey);
+
+  const snapshots = useMemo<Photo[]>(() => pickEvenlySpaced(photos, SNAPSHOT_LIMIT), [photos]);
+  const recentHighlights = useMemo<Highlight[]>(
+    () => highlights.slice(-HIGHLIGHT_LIMIT).reverse(),
+    [highlights],
+  );
+
+  const photoCount = photos.length;
+  const highlightCount = day?.highlightIds.length ?? highlights.length;
+  const audioLabel = audioTotalMs > 0 ? formatDurationFromMs(audioTotalMs) : '0:00';
+
   return (
     <ClipScreen>
       <View style={styles.flow}>
         <View style={styles.intro}>
           <Text variant="caption" color="textMuted">
-            2026 年 6 月 2 日 火曜日
+            {formatTodayDate(now)}
           </Text>
           <Text variant="heading1">今日のクリップ</Text>
         </View>
@@ -45,62 +71,74 @@ export function TodayScreen() {
         <View style={styles.gutter}>
           <Card>
             <View style={styles.metrics}>
-              <Metric label="写真" value="24" unit="枚" />
+              <Metric label="写真" value={String(photoCount)} unit="枚" />
               <MetricDivider />
-              <Metric label="録音" value="1:12" unit="時間" />
+              <Metric label="録音" value={audioLabel} unit="時間" />
               <MetricDivider />
-              <Metric label="ハイライト" value="6" unit="件" />
+              <Metric label="ハイライト" value={String(highlightCount)} unit="件" />
             </View>
           </Card>
         </View>
 
         <SectionHeader kicker="スナップショット" title="今日の眺め" />
         <View style={styles.gutter}>
-          <View style={styles.grid}>
-            {SNAPSHOTS.map((shot) => (
-              <View key={shot.time} style={styles.gridItem}>
-                <PhotoPlaceholder aspectRatio={1} radius={12} />
-                <View style={styles.gridCaption}>
-                  <Text variant="caption" weight="bold">
-                    {shot.time}
-                  </Text>
-                  <Text variant="caption" color="textMuted" numberOfLines={1}>
-                    {shot.caption}
-                  </Text>
+          {snapshots.length === 0 ? (
+            <EmptyHint message="まだ写真がありません。デバイスを接続すると 5 秒ごとに自動で撮影されます。" />
+          ) : (
+            <View style={styles.grid}>
+              {snapshots.map((shot) => (
+                <View key={shot.id} style={styles.gridItem}>
+                  <PhotoPlaceholder aspectRatio={1} radius={12} />
+                  <View style={styles.gridCaption}>
+                    <Text variant="caption" weight="bold">
+                      {formatClock(shot.capturedAt)}
+                    </Text>
+                    <Text variant="caption" color="textMuted" numberOfLines={1}>
+                      {shot.description ?? '—'}
+                    </Text>
+                  </View>
                 </View>
-              </View>
-            ))}
-          </View>
+              ))}
+            </View>
+          )}
         </View>
 
         <SectionHeader
           kicker="文字起こし"
           title="ハイライト"
           action={
-            <Text variant="caption" color="link">
-              すべて見る
-            </Text>
+            recentHighlights.length > 0 ? (
+              <Text variant="caption" color="link">
+                すべて見る
+              </Text>
+            ) : null
           }
         />
         <View style={[styles.gutter, styles.list]}>
-          {HIGHLIGHTS.map((h) => (
-            <Card key={h.id}>
-              <View style={styles.highlightHead}>
-                <Icon name="spark" size={14} color="textMuted" />
-                <Text variant="caption" color="textMuted">
-                  {h.time}
+          {recentHighlights.length === 0 ? (
+            <EmptyHint message="ハイライトはまだ抽出されていません。録音が進むと自動で追加されます。" />
+          ) : (
+            recentHighlights.map((h) => (
+              <Card key={h.id}>
+                <View style={styles.highlightHead}>
+                  <Icon name="spark" size={14} color="textMuted" />
+                  <Text variant="caption" color="textMuted">
+                    {formatClock(h.sourceAt)}
+                  </Text>
+                </View>
+                <Text variant="body" style={styles.quote}>
+                  {h.quote}
                 </Text>
-              </View>
-              <Text variant="body" style={styles.quote}>
-                {h.quote}
-              </Text>
-              <View style={styles.tagRow}>
-                {h.tags.map((t) => (
-                  <Tag key={t} label={t} />
-                ))}
-              </View>
-            </Card>
-          ))}
+                {h.tags.length > 0 ? (
+                  <View style={styles.tagRow}>
+                    {h.tags.map((t) => (
+                      <Tag key={t} label={`#${t}`} />
+                    ))}
+                  </View>
+                ) : null}
+              </Card>
+            ))
+          )}
         </View>
 
         <View style={styles.gutter}>
@@ -119,6 +157,27 @@ export function TodayScreen() {
         </View>
       </View>
     </ClipScreen>
+  );
+}
+
+function pickEvenlySpaced<T>(items: readonly T[], count: number): T[] {
+  if (items.length <= count) return [...items];
+  const step = (items.length - 1) / (count - 1);
+  const out: T[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const candidate = items[Math.round(i * step)];
+    if (candidate != null) out.push(candidate);
+  }
+  return out;
+}
+
+function EmptyHint({ message }: { message: string }) {
+  return (
+    <Card tone="soft" padding="md">
+      <Text variant="caption" color="textMuted">
+        {message}
+      </Text>
+    </Card>
   );
 }
 

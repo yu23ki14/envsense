@@ -2,22 +2,48 @@
  * DeviceScreen — 「デバイス」タブの本体。
  *
  * 上にステータス大カード、その下に撮影 / 音声 / 同期 / デバイス情報の
- * 設定リストを並べ、末尾にエクスポートへの導線を置く。MVP のため値はダミーで、
- * 実機との配線は別 Issue で行う。
+ * 設定リストを並べ、末尾にエクスポートへの導線を置く。各値は MMKV の
+ * Settings / PairedDevice から読む（編集 UI は別 Issue）。
  */
 import { router } from 'expo-router';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { Card, ClipScreen, ListRow, SectionHeader } from '../components';
+import { usePairedDevice, useSettings } from '../data';
 import { Button, Icon, type IconName, Text } from '../ui';
 
+function autoSyncLabel(mode: 'wifi' | 'always' | 'manual'): string {
+  switch (mode) {
+    case 'wifi':
+      return 'Wi-Fi のみ';
+    case 'always':
+      return '常時';
+    case 'manual':
+      return '手動';
+  }
+}
+
 export function DeviceScreen() {
+  const settings = useSettings();
+  const device = usePairedDevice();
+
+  const connected = device != null;
+  const headerSubtitle =
+    device != null ? `${device.name} · #${device.id.slice(-6)}` : 'デバイス未登録';
+  const statusTitle = connected ? '接続中' : '未接続';
+  const statusDesc = connected
+    ? `${settings.capture.intervalSec} 秒ごとに撮影しています`
+    : 'デバイスをペアリングしてください';
+
+  const batteryLabel = device?.lastBatteryPercent != null ? `${device.lastBatteryPercent}%` : '—';
+  const rssiLabel = device?.lastRssi != null ? `${device.lastRssi} dBm` : '—';
+
   return (
     <ClipScreen>
       <View style={styles.flow}>
         <View style={styles.header}>
           <Text variant="caption" color="textMuted">
-            My Clip · #C0FFEE
+            {headerSubtitle}
           </Text>
           <Text variant="heading2">デバイス</Text>
         </View>
@@ -30,17 +56,17 @@ export function DeviceScreen() {
               </View>
               <View style={styles.statusTexts}>
                 <Text variant="label" weight="bold">
-                  接続中
+                  {statusTitle}
                 </Text>
                 <Text variant="caption" color="textMuted">
-                  5 秒ごとに撮影しています
+                  {statusDesc}
                 </Text>
               </View>
             </View>
             <View style={styles.statusMetrics}>
-              <StatusMetric icon="battery" label="バッテリー" value="78%" />
-              <StatusMetric icon="bluetooth" label="信号" value="強" />
-              <StatusMetric icon="cloud" label="未同期" value="12 件" />
+              <StatusMetric icon="battery" label="バッテリー" value={batteryLabel} />
+              <StatusMetric icon="bluetooth" label="信号" value={rssiLabel} />
+              <StatusMetric icon="cloud" label="未同期" value="—" />
             </View>
           </Card>
         </View>
@@ -48,15 +74,25 @@ export function DeviceScreen() {
         <SectionHeader kicker="撮影" title="カメラ" />
         <View style={styles.gutter}>
           <Card padding="none">
-            <ListRow icon="image" title="撮影間隔" value="5 秒" onPress={() => undefined} />
+            <ListRow
+              icon="image"
+              title="撮影間隔"
+              value={`${settings.capture.intervalSec} 秒`}
+              onPress={() => undefined}
+            />
             <RowDivider />
-            <ListRow icon="bolt" title="解像度" value="VGA" onPress={() => undefined} />
+            <ListRow
+              icon="bolt"
+              title="解像度"
+              value={settings.capture.resolution}
+              onPress={() => undefined}
+            />
             <RowDivider />
             <ListRow
               icon="lock"
               title="プライベートモード"
               description="撮影を一時停止する"
-              value="オフ"
+              value={settings.capture.privateMode ? 'オン' : 'オフ'}
               onPress={() => undefined}
             />
           </Card>
@@ -65,12 +101,17 @@ export function DeviceScreen() {
         <SectionHeader kicker="音声" title="マイク" />
         <View style={styles.gutter}>
           <Card padding="none">
-            <ListRow icon="mic" title="録音" value="自動" onPress={() => undefined} />
+            <ListRow
+              icon="mic"
+              title="録音"
+              value={settings.audio.autoRecord ? '自動' : '手動'}
+              onPress={() => undefined}
+            />
             <RowDivider />
             <ListRow
               icon="ear"
               title="文字起こしモデル"
-              value="Whisper Large"
+              value={settings.audio.transcriptionModel}
               onPress={() => undefined}
             />
           </Card>
@@ -79,12 +120,17 @@ export function DeviceScreen() {
         <SectionHeader kicker="同期" title="クラウド" />
         <View style={styles.gutter}>
           <Card padding="none">
-            <ListRow icon="cloud" title="自動同期" value="Wi-Fi のみ" onPress={() => undefined} />
+            <ListRow
+              icon="cloud"
+              title="自動同期"
+              value={autoSyncLabel(settings.sync.autoSyncMode)}
+              onPress={() => undefined}
+            />
             <RowDivider />
             <ListRow
               icon="wifi"
               title="ネットワーク"
-              value="senspace-5G"
+              value={settings.sync.preferredSsid ?? '未設定'}
               onPress={() => undefined}
             />
           </Card>
@@ -93,7 +139,12 @@ export function DeviceScreen() {
         <SectionHeader kicker="デバイス" title="情報" />
         <View style={styles.gutter}>
           <Card padding="none">
-            <ListRow icon="cpu" title="ファームウェア" value="0.4.2" onPress={() => undefined} />
+            <ListRow
+              icon="cpu"
+              title="ファームウェア"
+              value={device?.firmwareVersion ?? '—'}
+              onPress={() => undefined}
+            />
             <RowDivider />
             <ListRow icon="refresh" title="アップデートを確認" onPress={() => undefined} />
             <RowDivider />

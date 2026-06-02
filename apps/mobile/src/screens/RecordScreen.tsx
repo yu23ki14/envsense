@@ -2,10 +2,12 @@
  * RecordScreen — 「記録」タブの本体。
  *
  * 検索 + 期間フィルタの上に、過去の日々をカードで一覧する。各カードを
- * タップすると `/journal` モーダルへ遷移する（MVP では同じダミー画面）。
+ * タップすると `/journal` モーダルへ遷移する。Day ロールアップを MMKV から読み出す。
  */
+import { differenceInCalendarDays, format, isAfter, parseISO, subDays } from 'date-fns';
+import { ja } from 'date-fns/locale/ja';
 import { router } from 'expo-router';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import {
@@ -17,11 +19,11 @@ import {
   type SegmentedControlOption,
   Tag,
 } from '../components';
+import type { Day } from '../data';
+import { useDaysList } from '../data';
 import { Icon, Text, TextField } from '../ui';
 
 type Range = 'week' | 'month' | 'all';
-
-const THUMB_SLOTS = ['a', 'b', 'c', 'd'];
 
 const RANGE_OPTIONS: SegmentedControlOption<Range>[] = [
   { value: 'week', label: '今週' },
@@ -29,44 +31,55 @@ const RANGE_OPTIONS: SegmentedControlOption<Range>[] = [
   { value: 'all', label: 'すべて' },
 ];
 
-const DAYS = [
-  {
-    id: '2026-06-01',
-    date: '6 月 1 日 月',
-    label: '昨日',
-    sessions: 4,
-    audio: '1:24',
-    tags: ['#仕事', '#散歩'],
-  },
-  {
-    id: '2026-05-31',
-    date: '5 月 31 日 日',
-    label: 'おととい',
-    sessions: 2,
-    audio: '0:38',
-    tags: ['#休日'],
-  },
-  {
-    id: '2026-05-30',
-    date: '5 月 30 日 土',
-    label: null,
-    sessions: 5,
-    audio: '2:10',
-    tags: ['#旅行', '#外出'],
-  },
-  {
-    id: '2026-05-29',
-    date: '5 月 29 日 金',
-    label: null,
-    sessions: 3,
-    audio: '1:05',
-    tags: ['#仕事'],
-  },
-];
+const THUMB_COUNT = 4;
+
+function relativeLabel(date: Date, now: Date): string | null {
+  const diff = differenceInCalendarDays(now, date);
+  if (diff === 1) return '昨日';
+  if (diff === 2) return 'おととい';
+  return null;
+}
+
+function formatDayHeader(date: Date): string {
+  return format(date, 'M 月 d 日 EEE', { locale: ja });
+}
+
+function formatDurationFromMs(totalMs: number): string {
+  const minutes = Math.floor(totalMs / 60000);
+  const hours = Math.floor(minutes / 60);
+  const mm = minutes % 60;
+  return `${hours}:${mm.toString().padStart(2, '0')}`;
+}
+
+function topTags(day: Day, max: number): string[] {
+  const entries = Object.entries(day.tagFrequencies);
+  entries.sort((a, b) => b[1] - a[1]);
+  return entries.slice(0, max).map(([tag]) => tag);
+}
+
+function matchesQuery(day: Day, q: string): boolean {
+  if (q.length === 0) return true;
+  if (day.date.includes(q)) return true;
+  return Object.keys(day.tagFrequencies).some((t) => t.includes(q));
+}
+
+function inRange(day: Day, range: Range, now: Date): boolean {
+  if (range === 'all') return true;
+  const parsed = parseISO(day.date);
+  if (range === 'week') return isAfter(parsed, subDays(now, 7));
+  return isAfter(parsed, subDays(now, 30));
+}
 
 export function RecordScreen() {
   const [query, setQuery] = useState('');
   const [range, setRange] = useState<Range>('week');
+  const days = useDaysList();
+
+  const now = useMemo(() => new Date(), []);
+  const filtered = useMemo(
+    () => days.filter((d) => inRange(d, range, now) && matchesQuery(d, query)),
+    [days, range, now, query],
+  );
 
   return (
     <ClipScreen>
@@ -83,51 +96,74 @@ export function RecordScreen() {
           <SegmentedControl options={RANGE_OPTIONS} value={range} onChange={setRange} />
         </View>
 
-        <SectionHeader kicker={`${DAYS.length} 件`} title="日々のクリップ" />
+        <SectionHeader kicker={`${filtered.length} 件`} title="日々のクリップ" />
 
-        <View style={styles.list}>
-          {DAYS.map((day) => (
-            <Card key={day.id} onPress={() => router.push('/journal')}>
-              <View style={styles.dayHeader}>
-                <View style={styles.dayHeaderTexts}>
-                  <Text variant="label" weight="bold">
-                    {day.date}
-                  </Text>
-                  {day.label ? (
-                    <Text variant="caption" color="textMuted">
-                      {day.label}
-                    </Text>
-                  ) : null}
-                </View>
-                <Icon name="chevronRight" size={18} color="textDisabled" />
-              </View>
-              <View style={styles.thumbRow}>
-                {THUMB_SLOTS.map((slot) => (
-                  <View key={slot} style={styles.thumb}>
-                    <PhotoPlaceholder aspectRatio={1} radius={8} />
-                  </View>
-                ))}
-              </View>
-              <View style={styles.dayMeta}>
-                <View style={styles.metaItem}>
-                  <Icon name="image" size={14} color="textMuted" />
-                  <Text variant="caption" color="textMuted">{`${day.sessions} セッション`}</Text>
-                </View>
-                <View style={styles.metaItem}>
-                  <Icon name="mic" size={14} color="textMuted" />
-                  <Text variant="caption" color="textMuted">
-                    {day.audio}
-                  </Text>
-                </View>
-              </View>
-              <View style={styles.tagRow}>
-                {day.tags.map((t) => (
-                  <Tag key={t} label={t} />
-                ))}
-              </View>
+        {filtered.length === 0 ? (
+          <View style={styles.list}>
+            <Card tone="soft" padding="md">
+              <Text variant="caption" color="textMuted">
+                該当する日がまだありません。デバイスを接続し、撮影と録音が記録されると一覧に並びます。
+              </Text>
             </Card>
-          ))}
-        </View>
+          </View>
+        ) : (
+          <View style={styles.list}>
+            {filtered.map((day) => {
+              const dayDate = parseISO(day.date);
+              const label = relativeLabel(dayDate, now);
+              const tags = topTags(day, 3);
+              const thumbIds = day.coverPhotoIds.slice(0, THUMB_COUNT);
+              return (
+                <Card
+                  key={day.date}
+                  onPress={() => router.push({ pathname: '/journal', params: { date: day.date } })}
+                >
+                  <View style={styles.dayHeader}>
+                    <View style={styles.dayHeaderTexts}>
+                      <Text variant="label" weight="bold">
+                        {formatDayHeader(dayDate)}
+                      </Text>
+                      {label ? (
+                        <Text variant="caption" color="textMuted">
+                          {label}
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Icon name="chevronRight" size={18} color="textDisabled" />
+                  </View>
+                  <View style={styles.thumbRow}>
+                    {Array.from({ length: THUMB_COUNT }).map((_, i) => (
+                      <View key={`${day.date}-thumb-${thumbIds[i] ?? i}`} style={styles.thumb}>
+                        <PhotoPlaceholder aspectRatio={1} radius={8} />
+                      </View>
+                    ))}
+                  </View>
+                  <View style={styles.dayMeta}>
+                    <View style={styles.metaItem}>
+                      <Icon name="image" size={14} color="textMuted" />
+                      <Text variant="caption" color="textMuted">
+                        {`${day.sessionCount} セッション`}
+                      </Text>
+                    </View>
+                    <View style={styles.metaItem}>
+                      <Icon name="mic" size={14} color="textMuted" />
+                      <Text variant="caption" color="textMuted">
+                        {formatDurationFromMs(day.audioTotalMs)}
+                      </Text>
+                    </View>
+                  </View>
+                  {tags.length > 0 ? (
+                    <View style={styles.tagRow}>
+                      {tags.map((t) => (
+                        <Tag key={t} label={`#${t}`} />
+                      ))}
+                    </View>
+                  ) : null}
+                </Card>
+              );
+            })}
+          </View>
+        )}
       </View>
     </ClipScreen>
   );

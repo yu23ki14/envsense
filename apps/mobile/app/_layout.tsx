@@ -6,6 +6,10 @@ import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { runMigrations } from '../src/data';
+
+// MMKV スキーマの初期化を最初の描画より前に済ませる。
+runMigrations();
 
 // フォントのロードが終わるまでスプラッシュスクリーンを表示し続ける。
 SplashScreen.preventAutoHideAsync();
