@@ -134,9 +134,10 @@ function buildOpusTags(): Uint8Array {
 
 /**
  * Wrap raw Opus frames (one 20 ms frame per array entry) in an Ogg container.
- * The result is a `audio/ogg` Blob suitable for Groq's Whisper endpoint.
+ * Returns the raw container bytes. Use `opusFramesToOggBlob` if you need a
+ * Blob (e.g. for an `audio/ogg` HTTP body).
  */
-export function opusFramesToOgg(frames: Uint8Array[]): Blob {
+export function opusFramesToOgg(frames: Uint8Array[]): Uint8Array {
   if (frames.length === 0) {
     throw new Error('opusFramesToOgg: no Opus frames provided');
   }
@@ -203,5 +204,13 @@ export function opusFramesToOgg(frames: Uint8Array[]): Blob {
     );
   }
 
-  return new Blob(pages, { type: 'audio/ogg' });
+  return concat(pages);
+}
+
+/**
+ * Same as {@link opusFramesToOgg} but returns a Blob with `audio/ogg` MIME.
+ */
+export function opusFramesToOggBlob(frames: Uint8Array[]): Blob {
+  const bytes = opusFramesToOgg(frames);
+  return new Blob([bytes.buffer as ArrayBuffer], { type: 'audio/ogg' });
 }

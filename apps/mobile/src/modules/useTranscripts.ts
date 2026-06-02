@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { opusFramesToOgg } from './audio';
+import { opusFramesToOggBlob } from './audio';
 import type { BleDevice } from './ble';
 import { transcribeAudioWithGroq } from './whisper';
 
@@ -39,7 +39,7 @@ export function useTranscripts(device: BleDevice): Transcript[] {
       const batch = pendingFrames;
       pendingFrames = [];
       try {
-        const ogg = opusFramesToOgg(batch);
+        const ogg = opusFramesToOggBlob(batch);
         const text = await transcribeAudioWithGroq(ogg, 'audio.ogg');
         if (!cancelled && text) {
           setTranscripts((prev) => [...prev, { text, timestamp: Date.now() }]);

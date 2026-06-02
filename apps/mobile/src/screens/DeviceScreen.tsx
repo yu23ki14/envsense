@@ -10,6 +10,7 @@ import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { Card, ClipScreen, ListRow, SectionHeader } from '../components';
 import { usePairedDevice, useSettings } from '../data';
+import { useDeviceContext } from '../modules/DeviceProvider';
 import { Button, Icon, type IconName, Text } from '../ui';
 
 function autoSyncLabel(mode: 'wifi' | 'always' | 'manual'): string {
@@ -25,18 +26,26 @@ function autoSyncLabel(mode: 'wifi' | 'always' | 'manual'): string {
 
 export function DeviceScreen() {
   const settings = useSettings();
-  const device = usePairedDevice();
+  const paired = usePairedDevice();
+  const { device: liveDevice, status, connect } = useDeviceContext();
 
-  const connected = device != null;
+  const isLive = liveDevice != null;
   const headerSubtitle =
-    device != null ? `${device.name} · #${device.id.slice(-6)}` : 'デバイス未登録';
-  const statusTitle = connected ? '接続中' : '未接続';
-  const statusDesc = connected
-    ? `${settings.capture.intervalSec} 秒ごとに撮影しています`
-    : 'デバイスをペアリングしてください';
+    paired != null ? `${paired.name} · #${paired.id.slice(-6)}` : 'デバイス未登録';
 
-  const batteryLabel = device?.lastBatteryPercent != null ? `${device.lastBatteryPercent}%` : '—';
-  const rssiLabel = device?.lastRssi != null ? `${device.lastRssi} dBm` : '—';
+  let statusTitle = '未接続';
+  if (isLive) statusTitle = '接続中';
+  else if (status.isAutoConnecting) statusTitle = '再接続中';
+  else if (status.isConnecting) statusTitle = '接続要求中';
+
+  const statusDesc = isLive
+    ? `${settings.capture.intervalSec} 秒ごとに撮影しています`
+    : paired != null
+      ? 'デバイスが範囲外か電源オフです'
+      : 'デバイスをペアリングしてください';
+
+  const batteryLabel = paired?.lastBatteryPercent != null ? `${paired.lastBatteryPercent}%` : '—';
+  const rssiLabel = paired?.lastRssi != null ? `${paired.lastRssi} dBm` : '—';
 
   return (
     <ClipScreen>
@@ -68,6 +77,18 @@ export function DeviceScreen() {
               <StatusMetric icon="bluetooth" label="信号" value={rssiLabel} />
               <StatusMetric icon="cloud" label="未同期" value="—" />
             </View>
+            {!isLive ? (
+              <View style={styles.statusAction}>
+                <Button
+                  variant="outline"
+                  loading={status.isConnecting || status.isAutoConnecting}
+                  onPress={connect}
+                  iconLeft={<Icon name="bluetooth" size={16} color="primary" />}
+                >
+                  {paired != null ? '再接続する' : 'デバイスを接続'}
+                </Button>
+              </View>
+            ) : null}
           </Card>
         </View>
 
@@ -142,7 +163,7 @@ export function DeviceScreen() {
             <ListRow
               icon="cpu"
               title="ファームウェア"
-              value={device?.firmwareVersion ?? '—'}
+              value={paired?.firmwareVersion ?? '—'}
               onPress={() => undefined}
             />
             <RowDivider />
@@ -223,6 +244,9 @@ const styles = StyleSheet.create((theme) => ({
   statusMetric: {
     flex: 1,
     gap: theme.spacing.xxs,
+  },
+  statusAction: {
+    marginTop: theme.spacing.md,
   },
   statusMetricHead: {
     flexDirection: 'row',

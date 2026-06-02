@@ -1,3 +1,12 @@
+export {
+  absoluteUri,
+  audioPath,
+  deleteFile,
+  fileSize,
+  photoPath,
+  readBytes,
+  writeBytes,
+} from '../storage/files';
 export * as secrets from '../storage/secrets';
 export * from './audioChunkRepo';
 export { getDay, markDayDirty, rebuildDay } from './dayBuilder';

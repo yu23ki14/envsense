@@ -7,6 +7,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { runMigrations } from '../src/data';
+import { DeviceProvider } from '../src/modules/DeviceProvider';
 
 // MMKV スキーマの初期化を最初の描画より前に済ませる。
 runMigrations();
@@ -33,11 +34,13 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <StatusBar style="dark" />
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="(tabs)" />
-        <Stack.Screen name="journal" options={{ presentation: 'modal' }} />
-        <Stack.Screen name="export" options={{ presentation: 'modal' }} />
-      </Stack>
+      <DeviceProvider>
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="(tabs)" />
+          <Stack.Screen name="journal" options={{ presentation: 'modal' }} />
+          <Stack.Screen name="export" options={{ presentation: 'modal' }} />
+        </Stack>
+      </DeviceProvider>
     </SafeAreaProvider>
   );
 }
