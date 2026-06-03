@@ -18,7 +18,7 @@ board_l      = 21.25;   // 基板 長さ
 board_w      = 17.6;    // 基板 幅
 pcb_t        = 1.15;    // PCB 厚み
 corner_r     = 1.5;     // 角 R
-usb_overhang = 0.85;    // USB-C 突き出し量
+usb_overhang = 1.6;     // USB-C コネクタの基板からの飛び出し（実測; 全長7.3 - 載り5.7。旧0.85を置換）
 usb_w        = 8.9;     // USB-C コネクタ 幅
 usb_h        = 3.0;     // USB-C コネクタ 高さ（筐体内 最高部品）
 usb_open_w   = 8.3;     // USB-C 開口 幅（受け口 実測）
@@ -82,17 +82,17 @@ bat_off    = [0, 0];        // バッテリーの XY 微調整（cavity 中心�
 // ===== Phase 1 追加計測（dimensions.md §7。実測で ASSUMED → MEASURED へ） =====
 // 【画像準拠の修正】カメラは折り返した FPC で「上面(+Z)」に立ち、レンズは +Z（真上）へ。
 //   位置は USB 端寄りで端をオーバーハング。FPC コネクタは逆端(遠端)。センサ = OV3660。
-lens_axis    = [3.5, board_w / 2];                                    // ASSUMED: USB端寄り・幅中央。§7実測
+lens_axis    = [3.5, board_w / 2];                                    // MEASURED: X=USBポートの真上(重なる,USB端から~3.5) / Y=幅中央(USBと同位置)
 cam_org      = [lens_axis[0] - lens_xy[0], lens_axis[1] - lens_xy[1]]; // レンズ = カメラ基板中心
-cam_base_z   = 4.0;   // ASSUMED: カメラ底面の z=0 からの高さ（サブ基板上面 ≈ b2b_gap+sense_t=3.8 の上）。§7実測
+cam_base_z   = usb_h + 3.4;   // MEASURED: USB 上面(usb_h) から +3.4（USB上面→カメラ下面）
 lens_front_d = 4.5;   // ASSUMED: レンズ前玉 有効径（開口・面取りの基準, < lens_d=6）
-cam_fov      = 120;   // ASSUMED: OV3660 広角レンズの画角(deg)。要データシート/実測
+cam_fov      = 110;   // ASSUMED: OV3660 広角変種と推定(候補 64°/110°)。突出方式でケラレ影響は小
 // マイク（試作は素の開口。防水メンブレンは後フェーズ）。部品面(+Z)に開口と仮定。
-mic_pos       = [assy_offset[0] + mic_xy[0], assy_offset[1] + mic_xy[1]];   // 中央やや遠端・左端寄り(=12.9/2)
+mic_pos       = [12.9, 3.0];   // MEASURED: X=12.9(長手,サブボード上) / Y=3.0(幅,端寄り)。X/Y入替を反映
 mic_port_face = "top";     // ASSUMED: 部品面(+Z)に音孔。§7 で確定
 mic_port_d    = 1.0;       // 試作の素開口径
 // 干渉
-usb_body_l = 7;       // ASSUMED: USB-C 本体の基板内側入り込み長（旧 conn_len）
+usb_body_l = 5.7;     // MEASURED: USB端→コネクタ本体内側端
 
 // ===== 派生：Z レイヤ（parts と enclosure で共有） =====
 // 積層（上→下）: 上部壁 / カメラ / サブ基板(Sense) / メイン基板(XIAO) / バッテリー / 下部壁
