@@ -38,22 +38,22 @@ module cut_usb() {
         cube([wall + 4, open_w, open_h]);
 }
 
-// レンズ穴: 下面（-Z）を貫く。カメラのレンズ光軸に合わせる。
+// レンズ穴: 上面（+Z）を貫く。開口貫通＝レンズ突出方式。
+// レンズホルダ径 + クリアランスのストレート穴。lens_axis は §7 実測で確定。
+// TODO[カメラ]: lens_front_d / cam_fov 確定後、内側にケラレ回避テーパ、
+//   外側に保持ボス/ポケット（光軸固定）を追加する。
 module cut_lens() {
-    cx = assy_offset[0] + cam_fpc_xy[0] + lens_xy[0];
-    cy = assy_offset[1] + cam_fpc_xy[1] - cam_w / 2 + lens_xy[1];
-    bottom_z = (z_bat_bot - clr) - wall_touch - 1;
-    translate([cx, cy, bottom_z])
-        cylinder(d = lens_d + 2 * clr, h = wall_touch + 2);
+    top_inner = (z_bat_bot - clr) + cav_h;  // キャビティ天面（内側）
+    translate([lens_axis[0], lens_axis[1], top_inner - 1])
+        cylinder(d = lens_d + 2 * clr, h = wall + 2);
 }
 
-// マイク穴: 下面の小穴（防水メッシュ前提なので最小径）。
+// マイク穴: 上面の小穴。試作は素の開口（mic_port_d）。
+// TODO[マイク]: mic_port_face 確定後に音道を通し、防水フェーズで音響メンブレン座 + 密閉ガスケットを追加。
 module cut_mic() {
-    cx = assy_offset[0] + mic_xy[0];
-    cy = assy_offset[1] + mic_xy[1];
-    bottom_z = (z_bat_bot - clr) - wall_touch - 1;
-    translate([cx, cy, bottom_z])
-        cylinder(d = 1.2, h = wall_touch + 2);
+    top_inner = (z_bat_bot - clr) + cav_h;
+    translate([mic_pos[0], mic_pos[1], top_inner - 1])
+        cylinder(d = mic_port_d, h = wall + 2);
 }
 
 // ----- シェル本体（分割前の一体筐体） -----

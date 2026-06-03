@@ -39,7 +39,7 @@ cam_fpc_xy  = [8.8, 9]; // カメラ FPC コネクタ 位置（拡張ボード �
 assy_h      = 7.8;          // 合体時 総厚（カメラ除く）
 assy_offset = [6.3, 0];     // 拡張ボードの主基板に対するズレ X/Y
 
-// ===== 4. OV2640 カメラモジュール（実測値） =====
+// ===== 4. OV3660 カメラモジュール（実測値） =====
 cam_l    = 7.8;             // カメラ基板 長さ
 cam_w    = 7.8;             // カメラ基板 幅
 cam_t    = 1.9;             // カメラ基板 厚み
@@ -79,21 +79,43 @@ bat_gap    = 0.5;           // カメラ面とバッテリー上面の仕切り
 //   横並びにする場合は cav_w/cav_h と battery 配置を切り替える。
 bat_off    = [0, 0];        // バッテリーの XY 微調整（cavity 中心基準）
 
+// ===== Phase 1 追加計測（dimensions.md §7。実測で ASSUMED → MEASURED へ） =====
+// 【画像準拠の修正】カメラは折り返した FPC で「上面(+Z)」に立ち、レンズは +Z（真上）へ。
+//   位置は USB 端寄りで端をオーバーハング。FPC コネクタは逆端(遠端)。センサ = OV3660。
+lens_axis    = [3.5, board_w / 2];                                    // ASSUMED: USB端寄り・幅中央。§7実測
+cam_org      = [lens_axis[0] - lens_xy[0], lens_axis[1] - lens_xy[1]]; // レンズ = カメラ基板中心
+cam_base_z   = 4.0;   // ASSUMED: カメラ底面の z=0 からの高さ（サブ基板上面 ≈ b2b_gap+sense_t=3.8 の上）。§7実測
+lens_front_d = 4.5;   // ASSUMED: レンズ前玉 有効径（開口・面取りの基準, < lens_d=6）
+cam_fov      = 120;   // ASSUMED: OV3660 広角レンズの画角(deg)。要データシート/実測
+// マイク（試作は素の開口。防水メンブレンは後フェーズ）。部品面(+Z)に開口と仮定。
+mic_pos       = [assy_offset[0] + mic_xy[0], assy_offset[1] + mic_xy[1]];   // 中央やや遠端・左端寄り(=12.9/2)
+mic_port_face = "top";     // ASSUMED: 部品面(+Z)に音孔。§7 で確定
+mic_port_d    = 1.0;       // 試作の素開口径
+// 干渉
+usb_body_l = 7;       // ASSUMED: USB-C 本体の基板内側入り込み長（旧 conn_len）
+
 // ===== 派生：Z レイヤ（parts と enclosure で共有） =====
-z_board_top = 0;
-z_board_bot = z_board_top - pcb_t;
-z_sense_top = z_board_bot - b2b_gap;
-z_sense_bot = z_sense_top - sense_t;
-z_cam_bot   = z_sense_bot - cam_t;
-z_bat_top   = z_cam_bot - bat_gap;
+// 積層（上→下）: 上部壁 / カメラ / サブ基板(Sense) / メイン基板(XIAO) / バッテリー / 下部壁
+// z=0 = メイン基板 上面（サブ基板を向く面）。+Z = 上（カメラ側） / -Z = 下（バッテリー側）
+z_board_top = 0;                    // メイン基板 上面
+z_board_bot = z_board_top - pcb_t;  // メイン基板 下面
+// サブ基板(Sense) はメイン基板の上(+Z)、B2B 隙間ぶん持ち上がる
+z_sense_bot = z_board_top + b2b_gap;
+z_sense_top = z_sense_bot + sense_t;
+// バッテリーはメイン基板の下(-Z)
+z_bat_top   = z_board_bot - bat_gap;
 z_bat_bot   = z_bat_top - bat_t_fit;
-z_usb_top   = usb_h;
+// 上面(+Z): カメラ（サブ基板の上に立つ）と USB コネクタ
+z_usb_top   = z_board_top + usb_h;
+z_cam_top   = cam_base_z + cam_t;   // カメラ基板 上面
+z_lens_top  = z_cam_top + lens_h;   // レンズ先端（+Z 最高点）= 天面壁を貫通して突出
 
 // ===== 派生：内部キャビティ寸法 =====
 // 基板と（積層した）バッテリーの両フットプリントを内包し、clr を足したもの。
 cav_l = max(board_l, bat_l) + 2 * clr;
 cav_w = max(board_w, bat_w) + 2 * clr;
-cav_h = (z_usb_top - z_bat_bot) + 2 * clr;
+// 内部はカメラ本体まで内包。レンズは天面壁を貫通させて外へ出す。
+cav_h = (max(z_cam_top, z_usb_top) - z_bat_bot) + 2 * clr;
 
 // キャビティ中心（基板フットプリント中心に揃える）
 cav_cx = board_l / 2;

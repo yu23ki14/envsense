@@ -26,10 +26,9 @@ module main_board() {
 
 // ----- USB-C コネクタ（上面 最高部品） -----
 module usb_connector() {
-    conn_len = 7;  // コネクタ本体の基板内側への入り込み（概算）
     color("Silver")
         translate([-usb_overhang, board_w / 2 - usb_w / 2, z_board_top])
-            cube([usb_overhang + conn_len, usb_w, usb_h]);
+            cube([usb_overhang + usb_body_l, usb_w, usb_h]);
 }
 
 // ----- Sense 拡張ボード（メイン基板の下面に B2B 接続） -----
@@ -43,16 +42,13 @@ module sense_board() {
 // TODO[実機]: fpc_l=8.7 と短いため、カメラは拡張ボードのすぐ脇に固定される。
 //   ここでは cam_fpc_xy 近傍に置いているが、実機の固定位置で要調整。
 module camera() {
-    // 拡張ボード ローカル座標 → 実空間
-    cx = assy_offset[0] + cam_fpc_xy[0];
-    cy = assy_offset[1] + cam_fpc_xy[1] - cam_w / 2;
-    translate([cx, cy, z_cam_bot]) {
+    // 折り返し FPC で上面(+Z)に立つ。レンズは +Z（真上）へ。位置は §7 実測で確定。
+    translate([cam_org[0], cam_org[1], cam_base_z])
         color("DimGray") rrect(cam_l, cam_w, cam_t, 0.5);
-        // レンズホルダー（下面 = 前面 へ突き出す）
-        color("Black")
-            translate([lens_xy[0], lens_xy[1], -lens_h])
-                cylinder(d = lens_d, h = lens_h);
-    }
+    // レンズホルダー（カメラ基板上面から +Z へ突き出す）
+    color("Black")
+        translate([lens_axis[0], lens_axis[1], z_cam_top])
+            cylinder(d = lens_d, h = lens_h);
 }
 
 // ----- バッテリー（基板スタックの背面に積層） -----
