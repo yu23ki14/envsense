@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>envsense clip — live preview</title>
+<style>
+  html,body{margin:0;height:100%;background:#1b1f24;color:#cfd6dd;font-family:system-ui,sans-serif;overflow:hidden}
+  #ui{position:fixed;top:10px;left:10px;z-index:10;font-size:13px;line-height:1.7}
+  label{display:block;cursor:pointer;user-select:none}
+  #status{position:fixed;top:10px;right:12px;font-size:12px;color:#7d8893}
+  #status.live{color:#5bd66f}
+  #hint{position:fixed;bottom:10px;left:10px;font-size:12px;color:#7d8893}
+</style>
+</head>
+<body>
+<div id="ui">
+  <label><input type="checkbox" id="cShell" checked> 筐体シェル（半透明）</label>
+  <label><input type="checkbox" id="cParts" checked> 内蔵部品</label>
+</div>
+<div id="status">接続中…</div>
+<div id="hint">ドラッグ=回転 / ホイール=ズーム / 右ドラッグ=パン ／ .scad を保存すると自動更新</div>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x1b1f24);
+const cam=new THREE.PerspectiveCamera(45,innerWidth/innerHeight,0.1,2000);
+const ren=new THREE.WebGLRenderer({antialias:true});
+ren.setSize(innerWidth,innerHeight);ren.setPixelRatio(devicePixelRatio);
+document.body.appendChild(ren.domElement);
+const ctrl=new OrbitControls(cam,ren.domElement);
+scene.add(new THREE.AmbientLight(0xffffff,0.6));
+const d=new THREE.DirectionalLight(0xffffff,0.9);d.position.set(40,60,80);scene.add(d);
+const d2=new THREE.DirectionalLight(0xffffff,0.4);d2.position.set(-40,-30,-60);scene.add(d2);
+
+// OpenSCAD は Z-up。Z-up にして見やすく回す。
+const root=new THREE.Group();
+root.rotation.x=-Math.PI/2;
+scene.add(root);
+
+const loader=new STLLoader();
+const layers=[
+  { url:'export/clip_shell.stl', mat:new THREE.MeshStandardMaterial({color:0x8aa0b0,transparent:true,opacity:0.32,roughness:0.6,depthWrite:false}), toggle:'cShell', mesh:null, mod:null },
+  { url:'export/clip_parts.stl', mat:new THREE.MeshStandardMaterial({color:0xe08a3c,roughness:0.5,metalness:0.1}), toggle:'cParts', mesh:null, mod:null },
+];
+
+let framed=false;
+async function load(layer){
+  const res=await fetch(layer.url,{cache:'no-store'});
+  if(!res.ok) return false;
+  layer.mod=res.headers.get('Last-Modified');
+  const geo=loader.parse(await res.arrayBuffer());
+  geo.computeVertexNormals();
+  if(layer.mesh){ layer.mesh.geometry.dispose(); layer.mesh.geometry=geo; }
+  else{ layer.mesh=new THREE.Mesh(geo,layer.mat); root.add(layer.mesh);
+        document.getElementById(layer.toggle).onchange=e=>layer.mesh.visible=e.target.checked; }
+  return true;
+}
+function frameOnce(){
+  if(framed) return;
+  const box=new THREE.Box3().setFromObject(root);
+  if(box.isEmpty()) return;
+  const c=box.getCenter(new THREE.Vector3()), sz=box.getSize(new THREE.Vector3());
+  root.position.sub(c);
+  const r=Math.max(sz.x,sz.y,sz.z);
+  cam.position.set(r*1.4,r*1.0,r*1.8); ctrl.target.set(0,0,0); ctrl.update();
+  framed=true;
+}
+const status=document.getElementById('status');
+async function poll(){
+  let changed=false, ok=true;
+  for(const L of layers){
+    try{
+      const h=await fetch(L.url,{method:'HEAD',cache:'no-store'});
+      const m=h.headers.get('Last-Modified');
+      if(h.ok && m!==L.mod){ if(await load(L)) changed=true; }
+    }catch(e){ ok=false; }
+  }
+  if(changed) frameOnce();
+  status.textContent=ok?'● live':'切断';
+  status.className=ok?'live':'';
+  setTimeout(poll,1200);
+}
+(async()=>{ for(const L of layers) await load(L); frameOnce(); poll(); })();
+addEventListener('resize',()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();ren.setSize(innerWidth,innerHeight);});
+(function loop(){requestAnimationFrame(loop);ctrl.update();ren.render(scene,cam);})();
+</script>
+</body>
+</html>
