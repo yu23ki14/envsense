@@ -1,5 +1,10 @@
 import { PermissionsAndroid, Platform } from 'react-native';
-import { BleManager, type Device, type Subscription } from 'react-native-ble-plx';
+import {
+  BleManager,
+  ConnectionPriority,
+  type Device,
+  type Subscription,
+} from 'react-native-ble-plx';
 import { fromByteArray, toByteArray } from 'react-native-quick-base64';
 import type {
   BleCharacteristic,
@@ -69,7 +74,13 @@ function scanForDevice(name: string, timeoutMs: number): Promise<Device> {
         reject(error);
         return;
       }
-      if (device && device.name === name) {
+      // The firmware puts the device name in the scan response, so on Android
+      // ble-plx surfaces it as `localName` while `name` stays null during
+      // scanning. Match either. (Service-UUID filtering doesn't work here: this
+      // firmware's advertising data doesn't expose the UUID in a form the
+      // Android scan filter matches.)
+      const advName = device?.name ?? device?.localName ?? null;
+      if (device && advName === name) {
         clearTimeout(timer);
         m.stopDeviceScan();
         resolve(device);
@@ -152,6 +163,10 @@ class NativeBleDevice implements BleDevice {
     const sub = this.device.onDisconnected(() => callback());
     return () => sub.remove();
   }
+
+  async disconnect(): Promise<void> {
+    await this.device.cancelConnection();
+  }
 }
 
 async function finishConnect(device: Device): Promise<NativeBleDevice> {
@@ -161,6 +176,17 @@ async function finishConnect(device: Device): Promise<NativeBleDevice> {
     // iOS negotiates MTU automatically and rejects manual requests;
     // Android may also fail on some stacks. Log and continue.
     console.warn('requestMTU failed (continuing)', err);
+  }
+  if (Platform.OS === 'android') {
+    try {
+      // The device streams ~50 Opus frames/s (one per BLE notification). At the
+      // default ~30-50 ms connection interval Android only carries ~20/s and the
+      // firmware drops the rest, so audio comes through choppy. High priority
+      // asks for the minimum (~11-15 ms) interval to fit the full frame rate.
+      await device.requestConnectionPriority(ConnectionPriority.High);
+    } catch (err) {
+      console.warn('requestConnectionPriority failed (continuing)', err);
+    }
   }
   await device.discoverAllServicesAndCharacteristics();
   return new NativeBleDevice(device);

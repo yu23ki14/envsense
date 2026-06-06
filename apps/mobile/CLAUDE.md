@@ -40,9 +40,6 @@ Navigation uses **expo-router** (file-based routing). Routes live in `app/`:
 Keep route files in `app/` thin — the Unistyles babel plugin only transforms files under `src`
 (see `babel.config.js`), so put styled components in `src/` and have routes just compose them.
 
-The legacy omiGlass UI (BLE connect screen + `DeviceView`) is parked in `src/legacy/`, pending
-re-integration into the new screens by the device-integration work.
-
 ## BLE layer (`src/modules/ble/`)
 
 Platform separation is essential. The `BleClient` interface in `types.ts` is implemented by
@@ -56,16 +53,19 @@ The UUIDs and packet formats must match the firmware (`firmware/src/config.h`).
 
 ## Device integration pipeline
 
-- **Photos**: `src/legacy/DeviceView` subscribes to the envsense GATT service's photo
-  characteristics and reassembles the chunked JPEG (writing to the photo-control characteristic
-  triggers automatic capture every 5 seconds). Image rotation behavior depends on the firmware
-  version (see `compareVersions`).
-- **Transcription**: `useTranscripts` subscribes to the Opus audio stream and sends ~10-second
-  segments to Groq Whisper wrapped as Ogg/Opus. There is no WASM Opus decoder — only Ogg wrapping
-  — so the same path works on web and native.
-- **Agent** (`src/agent/`): accumulates photo descriptions (Groq Vision) and answers questions
-  with Groq Llama. `Agent.use()` is a class method but is called as a React hook from a
-  component's render.
+`src/modules/useDeviceCapture.ts` is the single subscription that runs while a device is connected
+(mounted once by `DeviceProvider`). It handles both media streams:
+
+- **Photos**: subscribes to the photo characteristics and reassembles the chunked JPEG (writing to
+  the photo-control characteristic sets the capture interval). Image rotation depends on the
+  firmware version (see `compareVersions`).
+- **Audio / transcription**: accumulates the Opus stream into ~10 s segments. Each segment is
+  appended to a per-session concatenated Ogg/Opus file (`AudioSession`) via the incremental writer
+  in `modules/audio.ts`, and transcribed by `transcribeAudioFile` (`modules/whisper.ts`, Groq
+  Whisper) with the text stored on its `AudioChunk`. Corrupt frames (Opus TOC code ≠ 0, from rare
+  BLE glitches) are dropped before muxing or playback breaks. The `/transcript` screen renders a
+  day's sessions with an audio player (Android/Web only — iOS can't decode Ogg/Opus) and the
+  per-segment transcript.
 
 ## LLM clients
 

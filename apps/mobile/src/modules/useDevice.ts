@@ -22,7 +22,12 @@ async function readFirmwareVersion(device: BleDevice): Promise<string> {
   return new TextDecoder().decode(bytes);
 }
 
-export function useDevice(): [BleDevice | null, () => Promise<void>, DeviceStatus] {
+export function useDevice(): [
+  BleDevice | null,
+  () => Promise<void>,
+  () => Promise<void>,
+  DeviceStatus,
+] {
   const [device, setDevice] = React.useState<BleDevice | null>(null);
   const [isConnecting, setIsConnecting] = React.useState(false);
   const [isAutoConnecting, setIsAutoConnecting] = React.useState(true);
@@ -88,5 +93,16 @@ export function useDevice(): [BleDevice | null, () => Promise<void>, DeviceStatu
     }
   }, [attachDevice]);
 
-  return [device, doConnect, { isConnecting, isAutoConnecting }];
+  const doDisconnect = React.useCallback(async () => {
+    if (device == null) return;
+    try {
+      await device.disconnect();
+    } catch (e) {
+      console.warn('Disconnect failed', e);
+    }
+    // onDisconnect clears `device`, but clear eagerly in case it never fires.
+    setDevice(null);
+  }, [device]);
+
+  return [device, doConnect, doDisconnect, { isConnecting, isAutoConnecting }];
 }

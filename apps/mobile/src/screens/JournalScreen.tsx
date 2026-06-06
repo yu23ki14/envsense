@@ -6,13 +6,13 @@
  */
 import { differenceInCalendarDays, format, parseISO } from 'date-fns';
 import { ja } from 'date-fns/locale/ja';
-import { useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useMemo } from 'react';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { Card, ModalScreen, PhotoPlaceholder, SectionHeader, Tag } from '../components';
 import { dateKey, useDay, useHighlightsForDay, usePhotosForDay, useTimelineForDay } from '../data';
-import { Icon, Text } from '../ui';
+import { Button, Icon, Text } from '../ui';
 
 const PHOTO_GRID_LIMIT = 12;
 
@@ -82,6 +82,16 @@ export function JournalScreen() {
               <SummaryItem label="ハイライト" value={String(highlightCount)} />
             </View>
           </Card>
+        </View>
+
+        <View style={styles.gutter}>
+          <Button
+            variant="outline"
+            iconLeft={<Icon name="ear" size={16} color="primary" />}
+            onPress={() => router.push({ pathname: '/transcript', params: { date: resolvedDate } })}
+          >
+            録音と文字起こしを見る
+          </Button>
         </View>
 
         <SectionHeader kicker="写真" title="その日の眺め" />

@@ -15,6 +15,17 @@ export function audioPath(startedAtMs: number, id: string): string {
   return `audio/${sub}/${id}.ogg`;
 }
 
+/** Concatenated per-session Ogg/Opus file. */
+export function audioSessionPath(startedAtMs: number, id: string): string {
+  const sub = format(startedAtMs, 'yyyy/MM/dd');
+  return `audio/sessions/${sub}/${id}.ogg`;
+}
+
+/** Transient file used only to upload one segment to Groq, then deleted. */
+export function tempAudioPath(id: string): string {
+  return `audio/tmp/${id}.ogg`;
+}
+
 function fileFor(relative: string): File {
   return new File(root(), relative);
 }
@@ -29,6 +40,25 @@ export function writeBytes(relative: string, bytes: Uint8Array): void {
   if (!dir.exists) dir.create({ intermediates: true });
   if (!file.exists) file.create({ overwrite: true });
   file.write(bytes);
+}
+
+/**
+ * Append bytes to the end of a file, creating it if missing. Used by the audio
+ * session writer to grow the concatenated Ogg file one segment at a time.
+ */
+export function appendBytes(relative: string, bytes: Uint8Array): void {
+  const file = fileFor(relative);
+  if (!file.exists) {
+    writeBytes(relative, bytes);
+    return;
+  }
+  const handle = file.open();
+  try {
+    handle.offset = handle.size ?? 0;
+    handle.writeBytes(bytes);
+  } finally {
+    handle.close();
+  }
 }
 
 export async function readBytes(relative: string): Promise<Uint8Array | null> {

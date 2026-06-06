@@ -132,56 +132,85 @@ function buildOpusTags(): Uint8Array {
   return tags;
 }
 
+// Header pages (OpusHead + OpusTags) occupy Ogg sequence numbers 0 and 1, so
+// audio pages start at 2.
+const FIRST_AUDIO_SEQUENCE = 2;
+
+/** A fresh random Ogg bitstream serial number. */
+export function randomOggSerial(): number {
+  return (Math.random() * 0x100000000) >>> 0;
+}
+
 /**
- * Wrap raw Opus frames (one 20 ms frame per array entry) in an Ogg container.
- * Returns the raw container bytes. Use `opusFramesToOggBlob` if you need a
- * Blob (e.g. for an `audio/ogg` HTTP body).
+ * The two beginning-of-stream header pages for a new Opus bitstream: OpusHead
+ * (BOS, sequence 0) and OpusTags (sequence 1). Write these once when opening a
+ * session file, then append audio pages with {@link oggOpusAudioPages}.
  */
-export function opusFramesToOgg(frames: Uint8Array[]): Uint8Array {
-  if (frames.length === 0) {
-    throw new Error('opusFramesToOgg: no Opus frames provided');
-  }
-
-  const serial = (Math.random() * 0x100000000) >>> 0;
-  const pages: Uint8Array<ArrayBuffer>[] = [];
-  let sequence = 0;
-
-  // Page 0 -- beginning of stream, OpusHead alone.
+export function oggOpusHeaderBytes(serial: number): Uint8Array {
   const head = buildOpusHead();
-  pages.push(
+  const tags = buildOpusTags();
+  return concat([
     buildOggPage({
       headerType: 0x02,
       granulePosition: 0,
       serial,
-      sequence: sequence++,
+      sequence: 0,
       segmentTable: lacing(head.length),
       payload: head,
     }),
-  );
-
-  // Page 1 -- OpusTags alone.
-  const tags = buildOpusTags();
-  pages.push(
     buildOggPage({
       headerType: 0x00,
       granulePosition: 0,
       serial,
-      sequence: sequence++,
+      sequence: 1,
       segmentTable: lacing(tags.length),
       payload: tags,
     }),
-  );
+  ]);
+}
 
-  // Pages 2+ -- audio. Pack whole packets, capped at 255 lacing segments.
-  let cumulativeFrames = 0;
+export interface OggAudioPages {
+  bytes: Uint8Array;
+  /** Page sequence number to pass as `startSequence` on the next append. */
+  nextSequence: number;
+  /** Cumulative frame count to pass as `startGranuleFrames` on the next append. */
+  nextGranuleFrames: number;
+}
+
+/**
+ * Build audio pages for a run of Opus frames, continuing an existing bitstream.
+ * Pass the previous call's `nextSequence` / `nextGranuleFrames` to keep the
+ * page sequence and granule positions monotonic across appends. Set `eos` only
+ * on the final append of a stream.
+ */
+export function oggOpusAudioPages(opts: {
+  frames: Uint8Array[];
+  serial: number;
+  startSequence: number;
+  startGranuleFrames: number;
+  eos?: boolean;
+}): OggAudioPages {
+  const { frames, serial, startSequence, startGranuleFrames, eos = false } = opts;
+  if (frames.length === 0) {
+    return {
+      bytes: new Uint8Array(0),
+      nextSequence: startSequence,
+      nextGranuleFrames: startGranuleFrames,
+    };
+  }
+
+  const pages: Uint8Array<ArrayBuffer>[] = [];
+  let sequence = startSequence;
+  let cumulativeFrames = startGranuleFrames;
   let index = 0;
+  // Pack whole packets per page, capped at 255 lacing segments.
   while (index < frames.length) {
     const segmentTable: number[] = [];
     const chunks: Uint8Array[] = [];
     while (index < frames.length) {
       const segments = lacing(frames[index].length);
       if (segments.length > MAX_SEGMENTS_PER_PAGE) {
-        throw new Error('opusFramesToOgg: Opus frame too large for a single Ogg page');
+        throw new Error('oggOpusAudioPages: Opus frame too large for a single Ogg page');
       }
       if (segmentTable.length + segments.length > MAX_SEGMENTS_PER_PAGE) {
         break;
@@ -194,7 +223,7 @@ export function opusFramesToOgg(frames: Uint8Array[]): Uint8Array {
     const isLastPage = index >= frames.length;
     pages.push(
       buildOggPage({
-        headerType: isLastPage ? 0x04 : 0x00,
+        headerType: eos && isLastPage ? 0x04 : 0x00,
         granulePosition: cumulativeFrames * SAMPLES_PER_FRAME_48K,
         serial,
         sequence: sequence++,
@@ -204,7 +233,28 @@ export function opusFramesToOgg(frames: Uint8Array[]): Uint8Array {
     );
   }
 
-  return concat(pages);
+  return { bytes: concat(pages), nextSequence: sequence, nextGranuleFrames: cumulativeFrames };
+}
+
+/**
+ * Wrap raw Opus frames (one 20 ms frame per array entry) in a complete,
+ * EOS-terminated Ogg container. Used for the transient per-segment file sent to
+ * the transcription API. For the durable session file, use the incremental
+ * {@link oggOpusHeaderBytes} + {@link oggOpusAudioPages} instead.
+ */
+export function opusFramesToOgg(frames: Uint8Array[]): Uint8Array {
+  if (frames.length === 0) {
+    throw new Error('opusFramesToOgg: no Opus frames provided');
+  }
+  const serial = randomOggSerial();
+  const audio = oggOpusAudioPages({
+    frames,
+    serial,
+    startSequence: FIRST_AUDIO_SEQUENCE,
+    startGranuleFrames: 0,
+    eos: true,
+  });
+  return concat([oggOpusHeaderBytes(serial), audio.bytes]);
 }
 
 /**

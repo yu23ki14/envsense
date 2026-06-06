@@ -71,6 +71,10 @@ class WebBleDevice implements BleDevice {
       this.device.removeEventListener('gattserverdisconnected', handler);
     };
   }
+
+  async disconnect(): Promise<void> {
+    this.server.disconnect();
+  }
 }
 
 class WebBleClient implements BleClient {

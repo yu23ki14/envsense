@@ -38,6 +38,7 @@ export default function RootLayout() {
         <Stack screenOptions={{ headerShown: false }}>
           <Stack.Screen name="(tabs)" />
           <Stack.Screen name="journal" options={{ presentation: 'modal' }} />
+          <Stack.Screen name="transcript" options={{ presentation: 'modal' }} />
           <Stack.Screen name="export" options={{ presentation: 'modal' }} />
         </Stack>
       </DeviceProvider>

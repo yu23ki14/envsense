@@ -1,12 +1,14 @@
 import { StorageKeys } from '../storage/keys';
 import { mmkv } from '../storage/mmkv';
 import * as m001 from './001-initial';
+import * as m002 from './002-audio-sessions';
 
 type Migration = { version: number; up: () => void };
 
-const MIGRATIONS: Migration[] = [{ version: m001.VERSION, up: m001.up }].sort(
-  (a, b) => a.version - b.version,
-);
+const MIGRATIONS: Migration[] = [
+  { version: m001.VERSION, up: m001.up },
+  { version: m002.VERSION, up: m002.up },
+].sort((a, b) => a.version - b.version);
 
 export const LATEST_VERSION = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
 

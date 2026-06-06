@@ -53,6 +53,10 @@ export function listAudioIdsForDay(date: string): string[] {
   return readIds(StorageKeys.audiosByDay(date));
 }
 
+export function listAudioSessionIdsForDay(date: string): string[] {
+  return readIds(StorageKeys.audioSessionsByDay(date));
+}
+
 export function listHighlightIdsForDay(date: string): string[] {
   return readIds(StorageKeys.highlightsByDay(date));
 }
@@ -84,6 +88,19 @@ export function registerAudio(id: string, startedAtMs: number): void {
 export function unregisterAudio(id: string, startedAtMs: number): void {
   const date = dateKey(startedAtMs);
   removeId(StorageKeys.audiosByDay(date), id);
+  markDayDirty(date);
+}
+
+export function registerAudioSession(id: string, startedAtMs: number): void {
+  const date = dateKey(startedAtMs);
+  ensureDateRegistered(date);
+  addId(StorageKeys.audioSessionsByDay(date), id);
+  markDayDirty(date);
+}
+
+export function unregisterAudioSession(id: string, startedAtMs: number): void {
+  const date = dateKey(startedAtMs);
+  removeId(StorageKeys.audioSessionsByDay(date), id);
   markDayDirty(date);
 }
 

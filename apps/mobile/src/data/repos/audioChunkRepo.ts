@@ -1,5 +1,4 @@
 import { AudioChunk } from '../schemas';
-import { deleteFile } from '../storage/files';
 import { StorageKeys } from '../storage/keys';
 import { deleteKey, getJSON, setJSON } from '../storage/mmkv';
 import { registerAudio, unregisterAudio } from './dayIndex';
@@ -19,7 +18,8 @@ export function saveAudioChunk(chunk: AudioChunk): void {
 export function deleteAudioChunk(id: string): void {
   const chunk = getAudioChunk(id);
   if (chunk == null) return;
-  deleteFile(chunk.filePath);
+  // The audio bytes live in the parent AudioSession's file, not per-chunk, so
+  // there is no standalone file to delete here.
   deleteKey(StorageKeys.audio(id));
   unregisterAudio(id, chunk.startedAt);
 }

@@ -1,10 +1,12 @@
-import type { AudioChunk, Day, Highlight, Photo } from '../schemas';
+import type { AudioChunk, AudioSession, Day, Highlight, Photo } from '../schemas';
 import { Day as DaySchema } from '../schemas';
 import { StorageKeys } from '../storage/keys';
 import { getJSON, setJSON } from '../storage/mmkv';
 import { getAudioChunksByIds } from './audioChunkRepo';
+import { getAudioSessionsByIds } from './audioSessionRepo';
 import {
   listAudioIdsForDay,
+  listAudioSessionIdsForDay,
   listHighlightIdsForDay,
   listPhotoIdsForDay,
   listTimelineIdsForDay,
@@ -48,11 +50,13 @@ export function getDay(date: string): Day | null {
 export function rebuildDay(date: string): Day {
   const photoIds = listPhotoIdsForDay(date);
   const audioChunkIds = listAudioIdsForDay(date);
+  const audioSessionIds = listAudioSessionIdsForDay(date);
   const highlightIds = listHighlightIdsForDay(date);
   const timelineEventIds = listTimelineIdsForDay(date);
 
   const photos = getPhotosByIds(photoIds).sort((a, b) => a.capturedAt - b.capturedAt);
   const audios = getAudioChunksByIds(audioChunkIds).sort((a, b) => a.startedAt - b.startedAt);
+  const sessions = getAudioSessionsByIds(audioSessionIds).sort((a, b) => a.startedAt - b.startedAt);
   const highlights = getHighlightsByIds(highlightIds).sort((a, b) => a.sourceAt - b.sourceAt);
   const timeline = getTimelineEventsByIds(timelineEventIds).sort((a, b) => a.bucketAt - b.bucketAt);
 
@@ -60,9 +64,10 @@ export function rebuildDay(date: string): Day {
     date,
     photoIds: photos.map((p) => p.id),
     audioChunkIds: audios.map((a) => a.id),
+    audioSessionIds: sessions.map((s) => s.id),
     highlightIds: highlights.map((h) => h.id),
     timelineEventIds: timeline.map((t) => t.id),
-    audioTotalMs: sumAudioDuration(audios),
+    audioTotalMs: sumSessionDuration(sessions),
     tagFrequencies: aggregateTags(highlights),
     coverPhotoIds: pickCoverPhotos(photos),
     sessionCount: countSessions(photos, audios),
@@ -73,11 +78,10 @@ export function rebuildDay(date: string): Day {
   return day;
 }
 
-function sumAudioDuration(audios: AudioChunk[]): number {
+function sumSessionDuration(sessions: AudioSession[]): number {
   let total = 0;
-  for (const a of audios) {
-    const span = a.endedAt - a.startedAt;
-    if (span > 0) total += span;
+  for (const s of sessions) {
+    if (s.durationMs > 0) total += s.durationMs;
   }
   return total;
 }

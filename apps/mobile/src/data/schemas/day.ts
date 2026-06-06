@@ -5,6 +5,7 @@ export const Day = z.object({
   date: DateKey,
   photoIds: z.array(Id),
   audioChunkIds: z.array(Id),
+  audioSessionIds: z.array(Id),
   highlightIds: z.array(Id),
   timelineEventIds: z.array(Id),
   audioTotalMs: z.number().int().nonnegative(),

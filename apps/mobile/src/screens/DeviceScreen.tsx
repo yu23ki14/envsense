@@ -28,7 +28,7 @@ function autoSyncLabel(mode: 'wifi' | 'always' | 'manual'): string {
 export function DeviceScreen() {
   const settings = useSettings();
   const paired = usePairedDevice();
-  const { device: liveDevice, status, connect } = useDeviceContext();
+  const { device: liveDevice, status, connect, disconnect } = useDeviceContext();
 
   const isLive = liveDevice != null;
   const headerSubtitle =
@@ -78,8 +78,16 @@ export function DeviceScreen() {
               <StatusMetric icon="bluetooth" label="信号" value={rssiLabel} />
               <StatusMetric icon="cloud" label="未同期" value="—" />
             </View>
-            {!isLive ? (
-              <View style={styles.statusAction}>
+            <View style={styles.statusAction}>
+              {isLive ? (
+                <Button
+                  variant="outline"
+                  onPress={disconnect}
+                  iconLeft={<Icon name="bluetooth" size={16} color="primary" />}
+                >
+                  切断する
+                </Button>
+              ) : (
                 <Button
                   variant="outline"
                   loading={status.isConnecting || status.isAutoConnecting}
@@ -88,8 +96,8 @@ export function DeviceScreen() {
                 >
                   {paired != null ? '再接続する' : 'デバイスを接続'}
                 </Button>
-              </View>
-            ) : null}
+              )}
+            </View>
           </Card>
         </View>
 

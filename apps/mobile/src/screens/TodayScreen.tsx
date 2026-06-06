@@ -7,6 +7,7 @@
  */
 import { format } from 'date-fns';
 import { ja } from 'date-fns/locale/ja';
+import { router } from 'expo-router';
 import { useMemo } from 'react';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
@@ -139,6 +140,16 @@ export function TodayScreen() {
               </Card>
             ))
           )}
+        </View>
+
+        <View style={styles.gutter}>
+          <Button
+            variant="outline"
+            iconLeft={<Icon name="ear" size={16} color="primary" />}
+            onPress={() => router.push({ pathname: '/transcript', params: { date: todayKey } })}
+          >
+            録音と文字起こしを見る
+          </Button>
         </View>
 
         <View style={styles.gutter}>

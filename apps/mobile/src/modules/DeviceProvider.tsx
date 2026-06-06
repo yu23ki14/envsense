@@ -11,16 +11,17 @@ type DeviceContextValue = {
   device: BleDevice | null;
   status: DeviceStatus;
   connect: () => Promise<void>;
+  disconnect: () => Promise<void>;
 };
 
 const DeviceContext = createContext<DeviceContextValue | null>(null);
 
 export function DeviceProvider({ children }: { children: ReactNode }) {
-  const [device, connect, status] = useDevice();
+  const [device, connect, disconnect, status] = useDevice();
   useDeviceCapture(device);
   const value = useMemo<DeviceContextValue>(
-    () => ({ device, status, connect }),
-    [device, status, connect],
+    () => ({ device, status, connect, disconnect }),
+    [device, status, connect, disconnect],
   );
   return <DeviceContext.Provider value={value}>{children}</DeviceContext.Provider>;
 }

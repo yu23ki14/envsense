@@ -19,6 +19,8 @@ export interface BleDevice {
   getService(uuid: string): Promise<BleService>;
   /** Register a callback for disconnect events. Returns an unsubscribe function. */
   onDisconnect(callback: () => void): () => void;
+  /** Drop the connection. The onDisconnect callbacks fire as a result. */
+  disconnect(): Promise<void>;
 }
 
 export interface RequestDeviceOptions {

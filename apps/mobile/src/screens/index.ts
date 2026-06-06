@@ -6,3 +6,4 @@ export { ExportScreen } from './ExportScreen';
 export { JournalScreen } from './JournalScreen';
 export { RecordScreen } from './RecordScreen';
 export { TodayScreen } from './TodayScreen';
+export { TranscriptScreen } from './TranscriptScreen';

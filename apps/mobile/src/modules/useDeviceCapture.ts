@@ -1,22 +1,32 @@
 /**
- * Subscribe to a connected BleDevice and persist photos / audio chunks to
- * the local repositories. The transcription pipeline lives separately and
- * fills in AudioChunk.transcript later.
+ * Subscribe to a connected BleDevice and persist photos and audio. Photos go to
+ * the photo repo; audio is appended to a per-session concatenated Ogg/Opus file
+ * (see {@link AudioSession}) and each ~10 s segment is transcribed via Groq,
+ * with the text stored on its {@link AudioChunk}.
  */
 import { useEffect } from 'react';
-import type { CaptureSettings, Photo, PhotoRotation } from '../data';
+import type { AudioChunk, AudioSession, CaptureSettings, Photo, PhotoRotation } from '../data';
 import {
-  audioPath,
+  appendBytes,
+  audioSessionPath,
+  dateKey,
+  deleteFile,
   getPairedDevice,
   getSettings,
   newId,
   photoPath,
   saveAudioChunk,
+  saveAudioSession,
   savePhoto,
+  tempAudioPath,
   writeBytes,
 } from '../data';
-import { opusFramesToOgg } from './audio';
+import { oggOpusAudioPages, oggOpusHeaderBytes, opusFramesToOgg, randomOggSerial } from './audio';
 import type { BleDevice } from './ble';
+import { transcribeAudioFile } from './whisper';
+
+// Groq Whisper model used by transcribeAudioFile; recorded on each AudioChunk.
+const TRANSCRIPTION_MODEL = 'whisper-large-v3-turbo';
 
 const ENVSENSE_SERVICE_UUID = 'ea800000-9c72-497f-81f9-752ffe11f565';
 const PHOTO_DATA_UUID = 'ea800005-9c72-497f-81f9-752ffe11f565';
@@ -28,6 +38,8 @@ const AUDIO_CODEC_ID_OPUS = 21;
 const AUDIO_PACKET_HEADER_SIZE = 3;
 const FRAMES_PER_SEGMENT = 500; // ~10s at 20ms per Opus frame.
 const SEGMENT_DURATION_MS = FRAMES_PER_SEGMENT * 20;
+// A gap longer than this (or a date change) starts a new audio session.
+const SESSION_GAP_MS = 15 * 60 * 1000;
 
 const NEW_ROTATION_FIRMWARE = '2.1.1';
 
@@ -89,21 +101,71 @@ function persistPhoto(buffer: Uint8Array, rotationDeg: PhotoRotation): void {
   savePhoto(photo);
 }
 
-function persistAudioChunk(frames: Uint8Array[], startedAt: number, endedAt: number): void {
-  if (frames.length === 0) return;
+/**
+ * The device encodes exactly one 20 ms frame per Opus packet, which is always
+ * TOC "code 0" (single-frame). A packet with any other code was corrupted in
+ * transit (rare BLE glitches). Such a frame makes the whole Ogg/Opus stream
+ * undecodable from that point: ffmpeg skips it but ExoPlayer (Android playback)
+ * aborts at the first one, so we drop corrupt frames before muxing.
+ */
+function isIntactOpusFrame(frame: Uint8Array): boolean {
+  return frame.length >= 1 && (frame[0] & 0x03) === 0;
+}
+
+// --- Audio session writer ---------------------------------------------------
+
+/** Open a new session file with its Ogg header pages and persist the record. */
+function startSession(date: string, startedAt: number): AudioSession {
   const id = newId();
-  const relative = audioPath(startedAt, id);
-  const ogg = opusFramesToOgg(frames);
-  writeBytes(relative, ogg);
-  saveAudioChunk({
+  const serial = randomOggSerial();
+  const filePath = audioSessionPath(startedAt, id);
+  writeBytes(filePath, oggOpusHeaderBytes(serial));
+  const session: AudioSession = {
     id,
+    date,
     startedAt,
-    endedAt,
-    filePath: relative,
-    bytes: ogg.length,
-    transcript: null,
-    transcribedAt: null,
+    endedAt: startedAt,
+    filePath,
+    durationMs: 0,
+    chunkCount: 0,
+    finalized: false,
+    ogg: { serial, nextSequence: 2, granuleFrames: 0 },
+  };
+  saveAudioSession(session);
+  return session;
+}
+
+/** Append one segment's audio pages to the session file and advance its state. */
+function appendSegment(
+  session: AudioSession,
+  frames: Uint8Array[],
+  startedAt: number,
+  endedAt: number,
+): AudioSession {
+  const { bytes, nextSequence, nextGranuleFrames } = oggOpusAudioPages({
+    frames,
+    serial: session.ogg.serial,
+    startSequence: session.ogg.nextSequence,
+    startGranuleFrames: session.ogg.granuleFrames,
   });
+  appendBytes(session.filePath, bytes);
+  const updated: AudioSession = {
+    ...session,
+    endedAt,
+    durationMs: session.durationMs + (endedAt - startedAt),
+    chunkCount: session.chunkCount + 1,
+    ogg: { serial: session.ogg.serial, nextSequence, granuleFrames: nextGranuleFrames },
+  };
+  saveAudioSession(updated);
+  return updated;
+}
+
+function finalizeSession(session: AudioSession): void {
+  if (session.finalized) return;
+  // We can't flag the file's last page as EOS without rewriting it (we never
+  // know a segment is the last one until a later gap/disconnect), so we only
+  // mark the record finalized. Players tolerate an Ogg stream with no EOS page.
+  saveAudioSession({ ...session, finalized: true });
 }
 
 export function useDeviceCapture(device: BleDevice | null): void {
@@ -112,9 +174,58 @@ export function useDeviceCapture(device: BleDevice | null): void {
     let cancelled = false;
     let unsubPhoto: (() => void) | null = null;
     let unsubAudio: (() => void) | null = null;
+    let activeSession: AudioSession | null = null;
 
     const firmwareVersion = getPairedDevice()?.firmwareVersion ?? '0.0.0';
     const newRotationLogic = compareVersions(firmwareVersion, NEW_ROTATION_FIRMWARE) >= 0;
+
+    // Transcribe one segment via a transient Ogg file (RN can't build a Blob
+    // from bytes, so the upload reads back a real file), then store the text on
+    // the chunk and delete the temp file.
+    const transcribeChunk = async (chunk: AudioChunk, frames: Uint8Array[]) => {
+      const tempRel = tempAudioPath(chunk.id);
+      try {
+        writeBytes(tempRel, opusFramesToOgg(frames));
+        const text = await transcribeAudioFile(tempRel);
+        if (cancelled || text.length === 0) return;
+        saveAudioChunk({
+          ...chunk,
+          transcript: { text, model: TRANSCRIPTION_MODEL },
+          transcribedAt: Date.now(),
+        });
+      } catch (err) {
+        if (!cancelled) console.warn('Transcription failed', err);
+      } finally {
+        deleteFile(tempRel);
+      }
+    };
+
+    const onSegment = (rawFrames: Uint8Array[], startedAt: number) => {
+      const frames = rawFrames.filter(isIntactOpusFrame);
+      const dropped = rawFrames.length - frames.length;
+      if (dropped > 0) console.warn(`Dropped ${dropped} corrupt audio frame(s)`);
+      if (frames.length === 0) return;
+      const endedAt = startedAt + SEGMENT_DURATION_MS;
+      const date = dateKey(startedAt);
+      const gap =
+        activeSession != null ? startedAt - activeSession.endedAt : Number.POSITIVE_INFINITY;
+      if (activeSession == null || activeSession.date !== date || gap > SESSION_GAP_MS) {
+        if (activeSession != null) finalizeSession(activeSession);
+        activeSession = startSession(date, startedAt);
+      }
+      activeSession = appendSegment(activeSession, frames, startedAt, endedAt);
+
+      const chunk: AudioChunk = {
+        id: newId(),
+        sessionId: activeSession.id,
+        startedAt,
+        endedAt,
+        transcript: null,
+        transcribedAt: null,
+      };
+      saveAudioChunk(chunk);
+      transcribeChunk(chunk, frames);
+    };
 
     (async () => {
       const service = await device.getService(ENVSENSE_SERVICE_UUID);
@@ -193,14 +304,24 @@ export function useDeviceCapture(device: BleDevice | null): void {
       unsubAudio = await audioChar.subscribe((array) => {
         if (cancelled) return;
         if (array.length <= AUDIO_PACKET_HEADER_SIZE) return;
-        if (segmentStartedAt == null) segmentStartedAt = Date.now();
-        pendingFrames.push(array.slice(AUDIO_PACKET_HEADER_SIZE));
-        if (pendingFrames.length >= FRAMES_PER_SEGMENT) {
-          const frames = pendingFrames;
-          const startedAt = segmentStartedAt;
-          pendingFrames = [];
-          segmentStartedAt = null;
-          persistAudioChunk(frames, startedAt, startedAt + SEGMENT_DURATION_MS);
+        // Batched packet: [idx_lo, idx_hi, frameCount] then frameCount times a
+        // 1-byte length followed by that many Opus frame bytes. Parsing by
+        // length to the end of the buffer also tolerates a wrong count byte.
+        let offset = AUDIO_PACKET_HEADER_SIZE;
+        while (offset < array.length) {
+          const len = array[offset] ?? 0;
+          offset += 1;
+          if (len === 0 || offset + len > array.length) break;
+          if (segmentStartedAt == null) segmentStartedAt = Date.now();
+          pendingFrames.push(array.slice(offset, offset + len));
+          offset += len;
+          if (pendingFrames.length >= FRAMES_PER_SEGMENT) {
+            const frames = pendingFrames;
+            const startedAt = segmentStartedAt;
+            pendingFrames = [];
+            segmentStartedAt = null;
+            onSegment(frames, startedAt);
+          }
         }
       });
     })().catch((err) => {
@@ -211,6 +332,7 @@ export function useDeviceCapture(device: BleDevice | null): void {
       cancelled = true;
       unsubPhoto?.();
       unsubAudio?.();
+      if (activeSession != null) finalizeSession(activeSession);
     };
   }, [device]);
 }

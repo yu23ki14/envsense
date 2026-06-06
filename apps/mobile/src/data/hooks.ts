@@ -1,9 +1,18 @@
 import { useMemo } from 'react';
 import { useMMKVString } from 'react-native-mmkv';
 import type { z } from 'zod';
-import { getAudioChunk, getDay, getHighlight, getPhoto, getTimelineEvent } from './repos';
+import {
+  getAudioChunk,
+  getAudioSession,
+  getDay,
+  getHighlight,
+  getPhoto,
+  getTimelineEvent,
+} from './repos';
 import { DateKeyList, IdList } from './repos/internal';
 import {
+  type AudioChunk,
+  type AudioSession,
   Day,
   DEFAULT_SETTINGS,
   type Highlight,
@@ -101,17 +110,39 @@ export function useTimelineForDay(date: string | null): TimelineEvent[] {
   }, [date, ids]);
 }
 
-export function useAudioTotalMsForDay(date: string | null): number {
+export function useAudioSessionsForDay(date: string | null): AudioSession[] {
+  const ids = useIds(date != null ? StorageKeys.audioSessionsByDay(date) : '__noop__');
+  return useMemo(() => {
+    if (date == null) return [];
+    const out: AudioSession[] = [];
+    for (const id of ids) {
+      const s = getAudioSession(id);
+      if (s != null) out.push(s);
+    }
+    return out.sort((a, b) => a.startedAt - b.startedAt);
+  }, [date, ids]);
+}
+
+export function useAudioChunksForDay(date: string | null): AudioChunk[] {
   const ids = useIds(date != null ? StorageKeys.audiosByDay(date) : '__noop__');
   return useMemo(() => {
-    if (date == null) return 0;
-    let total = 0;
+    if (date == null) return [];
+    const out: AudioChunk[] = [];
     for (const id of ids) {
-      const a = getAudioChunk(id);
-      if (a == null) continue;
-      const span = a.endedAt - a.startedAt;
-      if (span > 0) total += span;
+      const c = getAudioChunk(id);
+      if (c != null) out.push(c);
+    }
+    return out.sort((a, b) => a.startedAt - b.startedAt);
+  }, [date, ids]);
+}
+
+export function useAudioTotalMsForDay(date: string | null): number {
+  const sessions = useAudioSessionsForDay(date);
+  return useMemo(() => {
+    let total = 0;
+    for (const s of sessions) {
+      if (s.durationMs > 0) total += s.durationMs;
     }
     return total;
-  }, [date, ids]);
+  }, [sessions]);
 }
