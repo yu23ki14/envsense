@@ -9,6 +9,7 @@ export {
   type ClipDeviceStatusProps,
 } from './ClipDeviceStatus';
 export { ClipHeaderStrip, type ClipHeaderStripProps } from './ClipHeaderStrip';
+export { ClipPhoto, type ClipPhotoProps } from './ClipPhoto';
 export { ClipScreen, type ClipScreenProps } from './ClipScreen';
 export { ClipTabBar } from './ClipTabBar';
 export { ListRow, type ListRowProps } from './ListRow';

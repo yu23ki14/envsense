@@ -11,7 +11,7 @@ import { router } from 'expo-router';
 import { useMemo } from 'react';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { Card, ClipScreen, PhotoPlaceholder, SectionHeader, Tag } from '../components';
+import { Card, ClipPhoto, ClipScreen, SectionHeader, Tag } from '../components';
 import type { Highlight, Photo } from '../data';
 import {
   dateKey,
@@ -89,7 +89,7 @@ export function TodayScreen() {
             <View style={styles.grid}>
               {snapshots.map((shot) => (
                 <View key={shot.id} style={styles.gridItem}>
-                  <PhotoPlaceholder aspectRatio={1} radius={12} />
+                  <ClipPhoto photo={shot} radius={12} />
                   <View style={styles.gridCaption}>
                     <Text variant="caption" weight="bold">
                       {formatClock(shot.capturedAt)}

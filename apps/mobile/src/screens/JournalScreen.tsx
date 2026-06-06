@@ -10,7 +10,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useMemo } from 'react';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { Card, ModalScreen, PhotoPlaceholder, SectionHeader, Tag } from '../components';
+import { Card, ClipPhoto, ModalScreen, SectionHeader, Tag } from '../components';
 import { dateKey, useDay, useHighlightsForDay, usePhotosForDay, useTimelineForDay } from '../data';
 import { Button, Icon, Text } from '../ui';
 
@@ -106,7 +106,7 @@ export function JournalScreen() {
             <View style={styles.grid}>
               {gridPhotos.map((p) => (
                 <View key={p.id} style={styles.gridItem}>
-                  <PhotoPlaceholder aspectRatio={1} radius={10} />
+                  <ClipPhoto photo={p} radius={10} />
                 </View>
               ))}
             </View>

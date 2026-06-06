@@ -12,6 +12,7 @@ import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import {
   Card,
+  ClipPhoto,
   ClipScreen,
   PhotoPlaceholder,
   SectionHeader,
@@ -20,7 +21,7 @@ import {
   Tag,
 } from '../components';
 import type { Day } from '../data';
-import { useDaysList } from '../data';
+import { getPhoto, useDaysList } from '../data';
 import { Icon, Text, TextField } from '../ui';
 
 type Range = 'week' | 'month' | 'all';
@@ -132,11 +133,19 @@ export function RecordScreen() {
                     <Icon name="chevronRight" size={18} color="textDisabled" />
                   </View>
                   <View style={styles.thumbRow}>
-                    {Array.from({ length: THUMB_COUNT }).map((_, i) => (
-                      <View key={`${day.date}-thumb-${thumbIds[i] ?? i}`} style={styles.thumb}>
-                        <PhotoPlaceholder aspectRatio={1} radius={8} />
-                      </View>
-                    ))}
+                    {Array.from({ length: THUMB_COUNT }).map((_, i) => {
+                      const thumbId = thumbIds[i];
+                      const photo = thumbId != null ? getPhoto(thumbId) : null;
+                      return (
+                        <View key={`${day.date}-thumb-${thumbId ?? i}`} style={styles.thumb}>
+                          {photo != null ? (
+                            <ClipPhoto photo={photo} radius={8} />
+                          ) : (
+                            <PhotoPlaceholder aspectRatio={1} radius={8} />
+                          )}
+                        </View>
+                      );
+                    })}
                   </View>
                   <View style={styles.dayMeta}>
                     <View style={styles.metaItem}>

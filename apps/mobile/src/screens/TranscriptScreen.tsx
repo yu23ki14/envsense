@@ -76,14 +76,19 @@ export function TranscriptScreen() {
             </Card>
           </View>
         ) : (
-          sessions.map((session, index) => (
-            <SessionBlock
-              key={session.id}
-              session={session}
-              index={index}
-              chunks={chunksBySession.get(session.id) ?? []}
-            />
-          ))
+          // Newest recording first. The label keeps the chronological number
+          // (session 1 = first of the day) even though it renders last.
+          sessions
+            .map((session, index) => ({ session, number: index + 1 }))
+            .reverse()
+            .map(({ session, number }) => (
+              <SessionBlock
+                key={session.id}
+                session={session}
+                number={number}
+                chunks={chunksBySession.get(session.id) ?? []}
+              />
+            ))
         )}
       </View>
     </ModalScreen>
@@ -92,18 +97,20 @@ export function TranscriptScreen() {
 
 function SessionBlock({
   session,
-  index,
+  number,
   chunks,
 }: {
   session: AudioSession;
-  index: number;
+  number: number;
   chunks: AudioChunk[];
 }) {
   const range = `${formatClock(session.startedAt)} – ${formatClock(session.endedAt)}`;
   const duration = formatDurationFromSeconds(session.durationMs / 1000);
+  // Newest segment first, matching the session ordering.
+  const orderedChunks = [...chunks].reverse();
   return (
     <View>
-      <SectionHeader kicker={`セッション ${index + 1}`} title={range} />
+      <SectionHeader kicker={`セッション ${number}`} title={range} />
       <View style={[styles.gutter, styles.list]}>
         <Card padding="md">
           {Platform.OS === 'ios' ? (
@@ -126,7 +133,7 @@ function SessionBlock({
         ) : (
           <Card padding="md">
             <View style={styles.transcriptList}>
-              {chunks.map((chunk) => (
+              {orderedChunks.map((chunk) => (
                 <View key={chunk.id} style={styles.transcriptItem}>
                   <Text variant="caption" color="textMuted">
                     {formatClockSeconds(chunk.startedAt)}
