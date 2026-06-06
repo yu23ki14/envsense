@@ -6,43 +6,6 @@ const GROQ_TRANSCRIPTION_URL = 'https://api.groq.com/openai/v1/audio/transcripti
 const MODEL = 'whisper-large-v3-turbo';
 
 /**
- * Transcribe an audio Blob with Groq's Whisper endpoint. `filename` is what
- * Groq uses to infer the container format -- pass e.g. `audio.ogg` for
- * Ogg-encapsulated Opus (see {@link import('./audio').opusFramesToOgg}).
- *
- * Uses the built-in `fetch` (available on web and React Native) so the
- * pipeline carries no HTTP-client dependency.
- */
-export async function transcribeAudioWithGroq(
-  audio: Blob,
-  filename: string,
-  language?: string,
-): Promise<string> {
-  const form = new FormData();
-  // Do not set Content-Type manually: fetch derives the multipart boundary.
-  form.append('file', audio, filename);
-  form.append('model', MODEL);
-  form.append('response_format', 'json');
-  if (language) {
-    form.append('language', language);
-  }
-
-  const response = await fetch(GROQ_TRANSCRIPTION_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${keys.groq}`,
-    },
-    body: form,
-  });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(`Groq transcription failed: ${response.status} ${detail}`.trim());
-  }
-  const data = (await response.json()) as { text?: string };
-  return (data.text ?? '').trim();
-}
-
-/**
  * Transcribe a stored audio file (relative path under the app's document
  * directory) with Groq Whisper.
  *
@@ -70,7 +33,9 @@ export async function transcribeAudioFile(
     form.append('file', part as any);
   }
   form.append('model', MODEL);
-  form.append('response_format', 'json');
+  // verbose_json gives per-segment no_speech_prob, which we use to drop silence
+  // (Whisper otherwise hallucinates phrases like "Thank you." onto silence).
+  form.append('response_format', 'verbose_json');
   if (language) {
     form.append('language', language);
   }
@@ -86,6 +51,40 @@ export async function transcribeAudioFile(
     const detail = await response.text().catch(() => '');
     throw new Error(`Groq transcription failed: ${response.status} ${detail}`.trim());
   }
-  const data = (await response.json()) as { text?: string };
-  return (data.text ?? '').trim();
+  const data = (await response.json()) as { text?: string; segments?: WhisperSegment[] };
+  return speechText(data);
+}
+
+type WhisperSegment = { text?: string };
+
+// Whisper's no_speech_prob / avg_logprob / compression_ratio don't separate
+// silence from speech here (Groq reports no_speech_prob ≈ 0 even on silence),
+// but the *text* does: silence yields punctuation-only segments (".") or one of
+// a couple of stock hallucination phrases. Filter on that instead.
+const HAS_SPEECH_CHAR = /[a-z0-9぀-ヿ一-鿿가-힯]/i;
+// Only drop these exact phrases (case/punctuation-insensitive) — they're the
+// hallucinations Whisper emits on silence here. Keep the list tight so real
+// short utterances aren't lost.
+const HALLUCINATION_PHRASES = new Set(['thankyou', 'okay']);
+
+function normalizePhrase(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9぀-ヿ一-鿿가-힯]/gi, '');
+}
+
+function isNonSpeech(text: string): boolean {
+  if (!HAS_SPEECH_CHAR.test(text)) return true; // punctuation/symbols only -> silence
+  return HALLUCINATION_PHRASES.has(normalizePhrase(text));
+}
+
+function speechText(data: { text?: string; segments?: WhisperSegment[] }): string {
+  const segments = data.segments;
+  if (segments == null || segments.length === 0) {
+    // No segment metadata (shouldn't happen with verbose_json); fall back to text.
+    return (data.text ?? '').trim();
+  }
+  return segments
+    .map((s) => (s.text ?? '').trim())
+    .filter((t) => t.length > 0 && !isNonSpeech(t))
+    .join(' ')
+    .trim();
 }

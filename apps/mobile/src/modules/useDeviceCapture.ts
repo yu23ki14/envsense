@@ -5,7 +5,7 @@
  * with the text stored on its {@link AudioChunk}.
  */
 import { useEffect } from 'react';
-import type { AudioChunk, AudioSession, Photo, PhotoRotation } from '../data';
+import type { AudioSession, Photo, PhotoRotation } from '../data';
 import {
   appendBytes,
   audioSessionPath,
@@ -198,16 +198,26 @@ export function useDeviceCapture(device: BleDevice | null): void {
     const newRotationLogic = compareVersions(firmwareVersion, NEW_ROTATION_FIRMWARE) >= 0;
 
     // Transcribe one segment via a transient Ogg file (RN can't build a Blob
-    // from bytes, so the upload reads back a real file), then store the text on
-    // the chunk and delete the temp file.
-    const transcribeChunk = async (chunk: AudioChunk, frames: Uint8Array[]) => {
-      const tempRel = tempAudioPath(chunk.id);
+    // from bytes, so the upload reads back a real file). A chunk is only saved
+    // when transcription returns speech — silent/non-speech segments (which
+    // Whisper otherwise hallucinates onto) yield an empty string and no chunk.
+    const transcribeChunk = async (
+      sessionId: string,
+      startedAt: number,
+      endedAt: number,
+      frames: Uint8Array[],
+    ) => {
+      const id = newId();
+      const tempRel = tempAudioPath(id);
       try {
         writeBytes(tempRel, opusFramesToOgg(frames));
         const text = await transcribeAudioFile(tempRel);
         if (cancelled || text.length === 0) return;
         saveAudioChunk({
-          ...chunk,
+          id,
+          sessionId,
+          startedAt,
+          endedAt,
           transcript: { text, model: TRANSCRIPTION_MODEL },
           transcribedAt: Date.now(),
         });
@@ -233,16 +243,9 @@ export function useDeviceCapture(device: BleDevice | null): void {
       }
       activeSession = appendSegment(activeSession, frames, startedAt, endedAt);
 
-      const chunk: AudioChunk = {
-        id: newId(),
-        sessionId: activeSession.id,
-        startedAt,
-        endedAt,
-        transcript: null,
-        transcribedAt: null,
-      };
-      saveAudioChunk(chunk);
-      transcribeChunk(chunk, frames);
+      // The audio is always recorded into the session; transcribeChunk only
+      // persists a chunk if the segment actually contains speech.
+      transcribeChunk(activeSession.id, startedAt, endedAt, frames);
     };
 
     (async () => {
