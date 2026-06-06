@@ -128,7 +128,7 @@ typedef enum {
 
 #define MIC_SAMPLE_RATE 16000          // 16kHz sample rate
 #define MIC_BUFFER_SAMPLES 1600        // 100ms buffer (16000 * 0.1)
-#define MIC_GAIN 2                     // Microphone gain multiplier
+#define MIC_GAIN 4                     // Microphone gain multiplier (clamped to int16 in mic.cpp)
 #define AUDIO_RING_BUFFER_SAMPLES 8000 // 500ms of audio data
 
 // =============================================================================
