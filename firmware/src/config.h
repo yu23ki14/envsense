@@ -142,8 +142,8 @@ typedef enum {
 #define OPUS_VBR 1                     // Variable bitrate enabled
 
 // Audio BLE packet configuration
-#define AUDIO_PACKET_HEADER_SIZE 3     // 2 bytes index + 1 byte sub-index
-#define AUDIO_TX_RING_BUFFER_SIZE 16   // Number of encoded frames to buffer
+#define AUDIO_PACKET_HEADER_SIZE 3     // 2 bytes index + 1 byte frame count
+#define AUDIO_TX_RING_BUFFER_SIZE 64   // Encoded frames buffered (~1.3s) to ride out TX stalls
 
 // =============================================================================
 // BLE UUID DEFINITIONS - envsense Protocol

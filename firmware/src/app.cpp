@@ -71,6 +71,11 @@ BLECharacteristic *otaDataCharacteristic;
 bool audioEnabled = true;
 volatile bool audioSubscribed = false;
 uint16_t audioPacketIndex = 0;
+// Negotiated ATT MTU for the active connection (updated in onMtuChanged). The
+// audio TX packs as many Opus frames as fit into each notification, so a larger
+// MTU means fewer notifications for the same frame rate. 23 is the BLE default
+// until the client negotiates higher.
+volatile uint16_t negotiatedMtu = 23;
 
 // State
 bool connected = false;
@@ -83,7 +88,9 @@ unsigned long lastCaptureTime = 0;
 static uint8_t audio_tx_buffer[AUDIO_TX_BUFFER_SIZE];
 static volatile size_t audio_tx_write_pos = 0;
 static volatile size_t audio_tx_read_pos = 0;
-static uint8_t audio_packet_buffer[OPUS_OUTPUT_MAX_BYTES + AUDIO_PACKET_HEADER_SIZE];
+// One BLE notification holds the 3-byte header plus several length-prefixed
+// Opus frames, so it can be as large as the negotiated MTU.
+static uint8_t audio_batch_buffer[BLE_MTU_SIZE];
 
 size_t sent_photo_bytes = 0;
 size_t sent_photo_frames = 0;
@@ -112,7 +119,6 @@ void enableLightSleep();
 void onMicData(int16_t *data, size_t samples);
 void onOpusEncoded(uint8_t *data, size_t len);
 void processAudioTx();
-void broadcastAudioPacket(uint8_t *data, size_t len);
 
 // -------------------------------------------------------------------------
 // Button ISR
@@ -358,61 +364,100 @@ void onOpusEncoded(uint8_t *data, size_t len)
     audio_tx_write_pos = next_write;
 }
 
-void broadcastAudioPacket(uint8_t *data, size_t len)
+// Drain the encoded-frame ring buffer to BLE, packing as many Opus frames as
+// fit into each notification. Packet layout:
+//   [0..1] 16-bit LE packet index
+//   [2]    frame count N
+//   then N times: [1-byte frame length][frame bytes]
+// One frame per notification wastes the MTU (a frame is <=160 B but the MTU is
+// ~512 B); batching lets the full 50 frames/s fit in far fewer notifications,
+// so the connection interval no longer bottlenecks the stream. The companion
+// app parses this same layout in useDeviceCapture.
+void processAudioTx()
 {
     if (!connected || !audioSubscribed || audioDataCharacteristic == nullptr) {
         return;
     }
 
-    // Build packet: 2 bytes index + 1 byte sub-index + data
-    audio_packet_buffer[0] = audioPacketIndex & 0xFF;
-    audio_packet_buffer[1] = (audioPacketIndex >> 8) & 0xFF;
-    audio_packet_buffer[2] = 0; // Sub-index (for fragmentation if needed)
+    // A notification's value can be at most ATT_MTU - 3 bytes.
+    size_t maxValue = (negotiatedMtu > 6) ? (size_t)(negotiatedMtu - 3) : 20;
+    if (maxValue > sizeof(audio_batch_buffer)) {
+        maxValue = sizeof(audio_batch_buffer);
+    }
 
-    memcpy(audio_packet_buffer + AUDIO_PACKET_HEADER_SIZE, data, len);
+    while (audio_tx_read_pos != audio_tx_write_pos) {
+        audio_batch_buffer[0] = audioPacketIndex & 0xFF;
+        audio_batch_buffer[1] = (audioPacketIndex >> 8) & 0xFF;
+        size_t pos = AUDIO_PACKET_HEADER_SIZE; // frame count goes in byte [2]
+        uint8_t count = 0;
 
-    audioDataCharacteristic->setValue(audio_packet_buffer, len + AUDIO_PACKET_HEADER_SIZE);
-    audioDataCharacteristic->notify();
+        while (audio_tx_read_pos != audio_tx_write_pos) {
+            // Peek the next frame length (2-byte LE) without consuming it.
+            uint16_t len = audio_tx_buffer[audio_tx_read_pos] |
+                           (audio_tx_buffer[(audio_tx_read_pos + 1) % AUDIO_TX_BUFFER_SIZE] << 8);
 
-    audioPacketIndex++;
+            if (len == 0 || len > OPUS_OUTPUT_MAX_BYTES) {
+                // Corrupt entry: skip its length field and continue.
+                audio_tx_read_pos = (audio_tx_read_pos + 2) % AUDIO_TX_BUFFER_SIZE;
+                continue;
+            }
+
+            // Stop the batch if this frame won't fit -- but always include at
+            // least one frame so the buffer keeps draining even on a tiny MTU.
+            if (count > 0 && pos + 1 + len > maxValue) {
+                break;
+            }
+
+            // Consume the length field, then copy the frame bytes.
+            audio_tx_read_pos = (audio_tx_read_pos + 2) % AUDIO_TX_BUFFER_SIZE;
+            audio_batch_buffer[pos++] = (uint8_t)len;
+            for (uint16_t i = 0; i < len; i++) {
+                audio_batch_buffer[pos++] = audio_tx_buffer[audio_tx_read_pos];
+                audio_tx_read_pos = (audio_tx_read_pos + 1) % AUDIO_TX_BUFFER_SIZE;
+            }
+
+            if (++count == 255 || pos + 2 > maxValue) {
+                break;
+            }
+        }
+
+        if (count == 0) {
+            break;
+        }
+        audio_batch_buffer[2] = count;
+        audioDataCharacteristic->setValue(audio_batch_buffer, pos);
+        audioDataCharacteristic->notify();
+        audioPacketIndex++;
+
+        // Brief yield so the BLE stack can flush instead of overflowing its TX.
+        delay(1);
+    }
 }
 
-void processAudioTx()
+// 音声キャプチャ + Opus エンコードは専用タスクで回す。
+// opus_encode() は十数 KB のスタックを使い、Arduino の loopTask(8KB) で回すと
+// スタックオーバーフローや割り込みウォッチドッグ(TG1WDT)リセットを起こすため。
+// mic_process() 内の i2s_read がブロッキングで自然に yield するので、CPU を独占しない。
+static TaskHandle_t audioTaskHandle = nullptr;
+
+void audioTask(void *param)
 {
-    if (!connected || !audioSubscribed) {
-        return;
-    }
-
-    if (audioDataCharacteristic == nullptr) {
-        return;
-    }
-
-    // Check if we have data in the ring buffer
-    while (audio_tx_read_pos != audio_tx_write_pos) {
-        // Read length
-        uint16_t len =
-            audio_tx_buffer[audio_tx_read_pos] | (audio_tx_buffer[(audio_tx_read_pos + 1) % AUDIO_TX_BUFFER_SIZE] << 8);
-
-        if (len == 0 || len > OPUS_OUTPUT_MAX_BYTES) {
-            // Invalid packet, skip
-            audio_tx_read_pos = (audio_tx_read_pos + 2) % AUDIO_TX_BUFFER_SIZE;
-            continue;
+    for (;;) {
+        // 接続中かつ購読中のときだけエンコードする。未接続時に回し続けると
+        // i2s DMA 詰まり時に i2s_read が即 return してタスクが core1 を占有し、
+        // tick/割り込みが飢餓して Interrupt WDT(TG1WDT) リセットになるため。
+        if (audioEnabled && mic_is_running() && connected && audioSubscribed) {
+            mic_process(); // i2s_read でブロック → 他タスク/割り込みに譲る
+            opus_process();
+            // 送信もこのタスク内で即ドレインする。loop_app(core0)で送ると写真送信
+            // などでループが詰まる間に TX リングが溢れてフレームを落とすため、
+            // producer(opus_process)と同じ core1 タスクで直後に送って溢れを防ぐ。
+            // 両者が同一タスク=逐次実行なのでリングの read/write は競合しない。
+            processAudioTx();
+            vTaskDelay(1); // 毎周回 必ず yield して loopTask/idle/割り込みを飢餓させない
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
-
-        // Read data
-        static uint8_t temp_data[OPUS_OUTPUT_MAX_BYTES];
-        for (size_t i = 0; i < len; i++) {
-            temp_data[i] = audio_tx_buffer[(audio_tx_read_pos + 2 + i) % AUDIO_TX_BUFFER_SIZE];
-        }
-
-        // Update read position
-        audio_tx_read_pos = (audio_tx_read_pos + 2 + len) % AUDIO_TX_BUFFER_SIZE;
-
-        // Send packet
-        broadcastAudioPacket(temp_data, len);
-
-        // Small delay to prevent BLE congestion
-        delay(1);
     }
 }
 
@@ -434,8 +479,14 @@ class ServerHandler : public BLEServerCallbacks
     {
         connected = false;
         audioSubscribed = false;
+        negotiatedMtu = 23; // back to the BLE default until the next negotiation
         Serial.println("<<< BLE Client disconnected. Restarting advertising.");
         BLEDevice::startAdvertising();
+    }
+    void onMtuChanged(BLEServer *server, esp_ble_gatts_cb_param_t *param) override
+    {
+        negotiatedMtu = param->mtu.mtu;
+        Serial.printf("MTU negotiated: %u\n", negotiatedMtu);
     }
 };
 
@@ -588,6 +639,9 @@ void configure_ble()
 {
     Serial.println("Initializing BLE...");
     BLEDevice::init(BLE_DEVICE_NAME);
+    // Offer a large MTU so the audio TX can batch several Opus frames per
+    // notification (the client also requests this MTU on connect).
+    BLEDevice::setMTU(BLE_MTU_SIZE);
     BLEServer *server = BLEDevice::createServer();
     server->setCallbacks(new ServerHandler());
 
@@ -854,6 +908,9 @@ void setup_app()
 
         if (mic_start()) {
             mic_set_callback(onMicData);
+            // 音声処理を専用タスクへ(16KB スタック, core1)。優先度は 2 に抑え、
+            // audioTask 内で毎周回 yield することで loopTask/割り込みを飢餓させない。
+            xTaskCreatePinnedToCore(audioTask, "audio", 16384, NULL, 2, &audioTaskHandle, 1);
             Serial.println("Audio subsystem initialized successfully.");
         } else {
             Serial.println("Failed to start microphone!");
@@ -879,16 +936,9 @@ void loop_app()
     // Process OTA updates
     ota_loop();
 
-    // Process microphone data - always run to keep audio realtime
-    if (audioEnabled && mic_is_running()) {
-        mic_process();
-        opus_process();
-    }
-
-    // Send audio packets over BLE - PRIORITY over photo
-    if (connected && audioSubscribed) {
-        processAudioTx();
-    }
+    // 音声のキャプチャ/エンコード/送信はすべて audioTask(専用タスク)で実行する。
+    // ここ(loopTask)で送ると写真送信などでループが詰まる間に TX リングが溢れて
+    // 音声フレームを落とすため、producer と同じタスク内で送るようにした。
 
     // Check for power save mode (gentle optimization)
     if (!connected && !photoDataUploading && (now - lastActivity > IDLE_THRESHOLD_MS)) {

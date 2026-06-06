@@ -1,0 +1,6 @@
+# arduino-cli build / output artifacts
+/build/
+/dist/
+
+# UF2 ビルド成果物
+*.uf2
