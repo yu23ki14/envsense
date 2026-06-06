@@ -5,7 +5,7 @@
  * with the text stored on its {@link AudioChunk}.
  */
 import { useEffect } from 'react';
-import type { AudioChunk, AudioSession, CaptureSettings, Photo, PhotoRotation } from '../data';
+import type { AudioChunk, AudioSession, Photo, PhotoRotation } from '../data';
 import {
   appendBytes,
   audioSessionPath,
@@ -69,14 +69,32 @@ function rotationFromOrientation(orientation: number): PhotoRotation {
   }
 }
 
-function dimensionsFor(capture: CaptureSettings): { width: number; height: number } {
-  switch (capture.resolution) {
-    case 'SVGA':
-      return { width: 800, height: 600 };
-    case 'VGA':
-    default:
-      return { width: 640, height: 480 };
+/**
+ * Read a JPEG's pixel dimensions from its Start-Of-Frame marker. The firmware's
+ * resolution isn't reported in the BLE stream and isn't controlled by the app
+ * settings, so deriving width/height from the actual bytes keeps the stored
+ * metadata correct regardless of the firmware's frame size. Returns null if no
+ * SOF marker is found.
+ */
+function jpegDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+  let i = 2; // skip SOI (0xFFD8)
+  while (i + 9 < bytes.length) {
+    if (bytes[i] !== 0xff) {
+      i += 1;
+      continue;
+    }
+    const marker = bytes[i + 1] ?? 0;
+    // SOF0..SOF15 carry the frame size, excluding DHT/DAC/DNL (0xC4/0xCC/0xC8).
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      const height = ((bytes[i + 5] ?? 0) << 8) | (bytes[i + 6] ?? 0);
+      const width = ((bytes[i + 7] ?? 0) << 8) | (bytes[i + 8] ?? 0);
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    const segLen = ((bytes[i + 2] ?? 0) << 8) | (bytes[i + 3] ?? 0);
+    if (segLen < 2) break;
+    i += 2 + segLen;
   }
+  return null;
 }
 
 function persistPhoto(buffer: Uint8Array, rotationDeg: PhotoRotation): void {
@@ -84,7 +102,7 @@ function persistPhoto(buffer: Uint8Array, rotationDeg: PhotoRotation): void {
   const capturedAt = Date.now();
   const relative = photoPath(capturedAt, id);
   writeBytes(relative, buffer);
-  const { width, height } = dimensionsFor(getSettings().capture);
+  const { width, height } = jpegDimensions(buffer) ?? { width: 0, height: 0 };
   const photo: Photo = {
     id,
     capturedAt,
