@@ -44,9 +44,9 @@
 // =============================================================================
 // CAMERA CONFIGURATION - Power optimized for 6-8 hour battery life
 // =============================================================================
-#define CAMERA_FRAME_SIZE FRAMESIZE_VGA // 640x480 - optimal balance
-#define CAMERA_JPEG_QUALITY 25          // Slightly higher quality for better compression efficiency
-#define CAMERA_XCLK_FREQ 6000000        // 6MHz - reduced from 8MHz for power savings
+#define CAMERA_FRAME_SIZE FRAMESIZE_XGA // 1024x768 - good detail for Vision, fits BLE budget
+#define CAMERA_JPEG_QUALITY 12          // esp_camera quality is inverted (0=best..63=worst); 12 = high
+#define CAMERA_XCLK_FREQ 20000000       // 20MHz - sensor standard; 6MHz was too low for higher res
 #define CAMERA_FB_IN_PSRAM CAMERA_FB_IN_PSRAM
 #define CAMERA_GRAB_LATEST CAMERA_GRAB_LATEST
 

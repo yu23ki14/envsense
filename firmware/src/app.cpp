@@ -832,7 +832,7 @@ void configure_camera()
     // Use config.h camera settings optimized for battery life
     config.frame_size = CAMERA_FRAME_SIZE;
     config.pixel_format = PIXFORMAT_JPEG;
-    config.fb_count = 1;
+    config.fb_count = 2; // double-buffer for steadier capture at higher resolution
     config.jpeg_quality = CAMERA_JPEG_QUALITY;
     config.fb_location = CAMERA_FB_IN_PSRAM;
     config.grab_mode = CAMERA_GRAB_LATEST;
@@ -878,7 +878,7 @@ void setup_app()
     configure_camera();
 
     // Allocate buffer for photo chunks (200 bytes + 2 for frame index)
-    s_compressed_frame_2 = (uint8_t *) ps_calloc(202, sizeof(uint8_t));
+    s_compressed_frame_2 = (uint8_t *) ps_calloc(BLE_CHUNK_SIZE + 2, sizeof(uint8_t));
     if (!s_compressed_frame_2) {
         Serial.println("Failed to allocate chunk buffer!");
     } else {
@@ -982,9 +982,9 @@ void loop_app()
         }
     }
 
-    // If uploading, send chunks over BLE (interleave with audio - max 2 chunks per loop)
+    // If uploading, send chunks over BLE (interleave with audio - max 4 chunks per loop)
     static int photo_chunks_this_loop = 0;
-    if (photoDataUploading && fb && photo_chunks_this_loop < 2) {
+    if (photoDataUploading && fb && photo_chunks_this_loop < 4) {
         // Yield to audio if audio buffer has data
         if (audioSubscribed && audio_tx_read_pos != audio_tx_write_pos) {
             photo_chunks_this_loop = 0; // Reset for next loop
@@ -999,14 +999,14 @@ void loop_app()
                 s_compressed_frame_2[0] = 0; // Frame index low byte
                 s_compressed_frame_2[1] = 0; // Frame index high byte
                 s_compressed_frame_2[2] = (uint8_t) current_photo_orientation;
-                bytes_to_copy = (remaining > 199) ? 199 : remaining;
+                bytes_to_copy = (remaining > BLE_CHUNK_SIZE - 1) ? BLE_CHUNK_SIZE - 1 : remaining;
                 memcpy(&s_compressed_frame_2[3], &fb->buf[sent_photo_bytes], bytes_to_copy);
                 photoDataCharacteristic->setValue(s_compressed_frame_2, bytes_to_copy + 3);
             } else {
                 // Subsequent chunks
                 s_compressed_frame_2[0] = (uint8_t) (sent_photo_frames & 0xFF);
                 s_compressed_frame_2[1] = (uint8_t) ((sent_photo_frames >> 8) & 0xFF);
-                bytes_to_copy = (remaining > 200) ? 200 : remaining;
+                bytes_to_copy = (remaining > BLE_CHUNK_SIZE) ? BLE_CHUNK_SIZE : remaining;
                 memcpy(&s_compressed_frame_2[2], &fb->buf[sent_photo_bytes], bytes_to_copy);
                 photoDataCharacteristic->setValue(s_compressed_frame_2, bytes_to_copy + 2);
             }
