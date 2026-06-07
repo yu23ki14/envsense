@@ -71,6 +71,17 @@ module cut_usb_peb() {
         cube([well_d, usb_well_w, usb_well_h]);
 }
 
+// 静電タッチ電極（銅箔）座: 天面内側(キャビティ天井 z=cav_top_z)に浅い角丸ポケット。
+// 箔を貼り付けて位置決め＆壁へ密着。彫り込みは壁内に留め外面は貫かない（1.3mm 残す）。
+// リード線は空きの RTC タッチ GPIO へ（キャビティ内を引き回し。専用溝は設けない）。
+module cut_touch_pad() {
+    if (touch_pad)
+        translate([touch_pad_pos[0], touch_pad_pos[1], cav_top_z])
+            linear_extrude(height = touch_pad_depth + 0.01)
+                offset(r = touch_pad_r)
+                    square(touch_pad_size - 2 * touch_pad_r, center = true);
+}
+
 // シェル本体（分割前）: 外形 − キャビティ − 各開口、その後に基板リテンションを union。
 module pebble_shell_solid() {
     difference() {
@@ -79,6 +90,7 @@ module pebble_shell_solid() {
         cut_usb_peb();
         cut_lens();
         cut_mic();
+        cut_touch_pad();   // 天面内側のタッチ電極座
     }
     corner_grips();   // キャビティ減算後に union（隅クランプは意図的にキャビティ内へ張り出す）
 }
