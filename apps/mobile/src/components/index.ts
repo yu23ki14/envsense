@@ -21,4 +21,9 @@ export {
   type SegmentedControlOption,
   type SegmentedControlProps,
 } from './SegmentedControl';
+export {
+  SettingSelectModal,
+  type SettingSelectModalProps,
+  type SettingSelectOption,
+} from './SettingSelectModal';
 export { Tag, type TagProps } from './Tag';

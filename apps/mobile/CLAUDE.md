@@ -61,17 +61,52 @@ The UUIDs and packet formats must match the firmware (`firmware/src/config.h`).
   firmware version (see `compareVersions`).
 - **Audio / transcription**: accumulates the Opus stream into ~10 s segments. Each segment is
   appended to a per-session concatenated Ogg/Opus file (`AudioSession`) via the incremental writer
-  in `modules/audio.ts`, and transcribed by `transcribeAudioFile` (`modules/whisper.ts`, Groq
-  Whisper) with the text stored on its `AudioChunk`. Corrupt frames (Opus TOC code ≠ 0, from rare
+  in `modules/audio.ts`, and transcribed by `transcribe()` (`modules/llm`, which resolves the
+  provider from `Settings.audio.transcriptionModel`) with the text and the actual model ref stored
+  on its `AudioChunk`. Corrupt frames (Opus TOC code ≠ 0, from rare
   BLE glitches) are dropped before muxing or playback breaks. The `/transcript` screen renders a
   day's sessions with an audio player (Android/Web only — iOS can't decode Ogg/Opus) and the
   per-segment transcript.
 
 ## LLM clients
 
-`src/modules/` contains `groq-llama3` / `openai` / `ollama` / `whisper`. API keys are read from
-`EXPO_PUBLIC_*` environment variables via `src/keys.ts` (`.env` is gitignored; note that the
-`EXPO_PUBLIC_` prefix means the value is embedded into the client bundle).
+`src/modules/llm/` is the common inference abstraction: a `task` (currently only `transcription`)
+resolves to a `cloud` or `local` provider behind a shared interface. `catalog.ts` is the single
+source of truth for the selectable models (used by both the settings UI and the resolver);
+`registry.ts` exposes `transcribe()`, which reads `Settings.audio.transcriptionModel` and falls
+back to the cloud default when the chosen provider is unavailable. The cloud Groq Whisper provider
+lives in `transcription/groq.ts`.
+
+On-device STT (`transcription/whisperLocal.ts`) runs via **LiteRT-LM** (`react-native-litert-lm`,
+Google AI Edge runtime) with **Gemma 4 E2B** (a multimodal model — audio → text). On Android it uses
+the OpenCL GPU delegate (Pixel devices; Samsung/Qualcomm typically lack OpenCL → falls back to CPU),
+on iOS Metal. We chose this after whisper.rn (Android GPU is iOS-only → CPU-slow) and Cactus
+(`cactus-react-native` requires nitro 0.33, incompatible with the nitro 0.35 that MMKV/Unistyles need
+on RN 0.83) both proved unworkable — see git history.
+
+Pipeline (platform-split engine, BLE-style dynamic import in `whisper/index.ts`;
+`engine.native.ts` = LiteRT, `engine.web.ts` = stub): the device streams Opus, but Gemma's audio
+input is a **WAV file path** and iOS can't decode Ogg/Opus at the OS level — so `engine.native.ts`
+decodes Ogg→PCM with `react-native-audio-api`'s `decodeAudioData`, writes a temp 16 kHz mono WAV
+(via the data layer), and calls `llm.sendMessageWithAudio(prompt, wavPath)`. The Gemma model
+(`gemma-4-e2b`, ~2.6 GB) is **not bundled** — LiteRT downloads it on first use (`loadModel(url, …,
+onProgress)`, cached), and readiness is tracked via an MMKV flag (`litert:model-ready:<id>`) since
+there's no public exists-check. Until downloaded (or on non-GPU devices where you may prefer cloud),
+`isAvailable()` is false and `transcribe()` falls back to cloud, so the pipeline never stalls.
+Backend is chosen with `checkBackendSupport('gpu')` (gpu when available, else cpu). Local
+transcription is serialized (one segment at a time) with bounded retry. Native deps
+(`react-native-litert-lm`, `react-native-audio-api`, `react-native-worklets`) require an
+`expo prebuild` + EAS dev build rebuild; the `react-native-litert-lm` config plugin sets Android
+minSdk 26 / Kotlin, and `react-native-worklets/plugin` must be the last Babel plugin.
+
+Caveats: Gemma "reasons over" audio rather than being a pure ASR, so transcription is prompt-driven
+(`transcriptionPrompt()` in `engine.native.ts`) and verbatim accuracy/latency for Japanese must be
+verified on-device — adjust the prompt or model (E4B) if needed. Gemma 4 E2B needs ~4 GB+ RAM.
+
+The legacy clients `groq-llama3` / `openai` / `ollama` (image / text) still live directly under
+`src/modules/` and are slated to migrate into `modules/llm/` as `vision` / `text` tasks. API keys
+are read from `EXPO_PUBLIC_*` environment variables via `src/keys.ts` (`.env` is gitignored; note
+that the `EXPO_PUBLIC_` prefix means the value is embedded into the client bundle).
 
 ## Design system (`src/ui/`)
 

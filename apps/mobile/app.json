@@ -52,7 +52,17 @@
       "expo-font",
       "expo-router",
       "expo-secure-store",
-      "expo-audio"
+      "expo-audio",
+      [
+        "react-native-audio-api",
+        {
+          "iosBackgroundMode": false,
+          "androidForegroundService": false,
+          "androidPermissions": [],
+          "disableFFmpeg": true
+        }
+      ],
+      "react-native-litert-lm"
     ],
     "extra": {
       "eas": {

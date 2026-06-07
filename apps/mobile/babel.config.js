@@ -7,6 +7,9 @@ module.exports = (api) => {
   api.cache(true);
   return {
     presets: ['babel-preset-expo'],
-    plugins: [['react-native-unistyles/plugin', { root: 'src' }]],
+    // react-native-worklets/plugin は react-native-audio-api（worklets ベース）が
+    // 必要とする。Worklets のコード変換は最後に実行される必要があるため、必ず
+    // plugins 配列の末尾に置く。
+    plugins: [['react-native-unistyles/plugin', { root: 'src' }], 'react-native-worklets/plugin'],
   };
 };

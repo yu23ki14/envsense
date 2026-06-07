@@ -23,10 +23,7 @@ import {
 } from '../data';
 import { oggOpusAudioPages, oggOpusHeaderBytes, opusFramesToOgg, randomOggSerial } from './audio';
 import type { BleDevice } from './ble';
-import { transcribeAudioFile } from './whisper';
-
-// Groq Whisper model used by transcribeAudioFile; recorded on each AudioChunk.
-const TRANSCRIPTION_MODEL = 'whisper-large-v3-turbo';
+import { transcribe } from './llm';
 
 const ENVSENSE_SERVICE_UUID = 'ea800000-9c72-497f-81f9-752ffe11f565';
 const PHOTO_DATA_UUID = 'ea800005-9c72-497f-81f9-752ffe11f565';
@@ -211,14 +208,14 @@ export function useDeviceCapture(device: BleDevice | null): void {
       const tempRel = tempAudioPath(id);
       try {
         writeBytes(tempRel, opusFramesToOgg(frames));
-        const text = await transcribeAudioFile(tempRel);
+        const { text, model } = await transcribe(tempRel);
         if (cancelled || text.length === 0) return;
         saveAudioChunk({
           id,
           sessionId,
           startedAt,
           endedAt,
-          transcript: { text, model: TRANSCRIPTION_MODEL },
+          transcript: { text, model },
           transcribedAt: Date.now(),
         });
       } catch (err) {
