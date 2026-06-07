@@ -9,7 +9,7 @@
 //   → http://localhost:8787/ を開く
 //   → 任意のエディタで .scad を保存すると 3D が自動更新（カメラ位置は保持）
 //
-// 環境変数: OPENSCAD（既定 "openscad"） / PORT（既定 8787）
+// 環境変数: OPENSCAD（既定 "openscad"） / PORT（既定 8787） / VARIANT（既定 "box"。"pebble" で石外形）
 
 import { spawn } from 'node:child_process';
 import { watch } from 'node:fs';
@@ -22,6 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const exportDir = join(here, 'export');
 const PORT = process.env.PORT || 8787;
 const OPENSCAD = process.env.OPENSCAD || 'openscad';
+const VARIANT = process.env.VARIANT || 'box';
 
 const TARGETS = [
   { mode: 'shell', out: 'clip_shell.stl' },
@@ -38,7 +39,15 @@ const TYPES = {
 function exportOne({ mode, out }) {
   return new Promise((res) => {
     const tmp = join(exportDir, `.tmp_${out}`);
-    const args = ['-D', `mode="${mode}"`, '-o', tmp, join(here, 'clip.scad')];
+    const args = [
+      '-D',
+      `variant="${VARIANT}"`,
+      '-D',
+      `mode="${mode}"`,
+      '-o',
+      tmp,
+      join(here, 'clip.scad'),
+    ];
     const p = spawn(OPENSCAD, args, { stdio: ['ignore', 'ignore', 'inherit'] });
     p.on('error', (e) => {
       console.error(`openscad 起動失敗: ${e.message}`);
