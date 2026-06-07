@@ -50,9 +50,9 @@ fpc_w    = 6;               // FPC 幅
 fpc_l    = 8.7;             // FPC 長さ
 
 // ===== 5. バッテリー（実測値） =====
-bat_l       = 25.5;         // セル本体 長さ
-bat_w       = 19.5;         // セル本体 幅
-bat_t       = 6.7;          // セル本体 厚み（最厚部）
+bat_l       = 32.7;         // セル本体 長さ（基板長 21.25 より長い → レイアウト注意）
+bat_w       = 20;           // セル本体 幅
+bat_t       = 7.6;          // セル本体 厚み（最厚部）
 bat_pcm_l   = 6.6;          // PCM 張り出し
 bat_wire_d  = 0.7;          // リード線 線径
 
@@ -70,14 +70,31 @@ lip_h      = 2.0;   // 本体/蓋の合わせ目リップ（印籠）の高さ
 lip_t      = 1.0;   // リップの厚み
 lip_clr    = 0.15;  // リップのはめ合いクリアランス
 
+// ===== 基板リテンション（4隅クランプ）=====
+// 実測: メイン基板の4隅とも部品なしマージン 1.8mm（角は corner_r の R）。
+//   Sense 拡張ボードには余白が無いので一切触れない。後(Sense側)2隅の上押さえは
+//   B2B 隙間(b2b_gap)内に収め、メイン基板の上面(z=0)だけを押さえる
+//   （Sense 下面 z_sense_bot=b2b_gap には当てない）。
+//   基板はバッテリー基準のキャビティより小さく宙に浮くので、隅クレードルが
+//   Z 受け（棚）と XY 位置決め（角の R を clr 付きで抱く）を兼ねる。
+board_keepout = 1.8;   // 実測: 4隅の部品なしマージン（参考・チェック用）
+clamp_reach   = 1.0;   // 基板縁への被さり量。clamp_reach + clr < board_keepout を守る
+clamp_run     = 2.5;   // 角から各辺に沿うグリップ長さ（USB/カメラ等を避ける範囲）
+shelf_t       = 0.8;   // 下受け棚の厚み(z)。bat_gap 以下に収める
+top_h_front   = 2.5;   // 前(USB側)2隅の上押さえ高さ。上方が空くので高め可
+top_h_rear    = 2.0;   // 後(Sense側)2隅の上押さえ高さ。B2B 隙間内(< b2b_gap)に収める
+weld          = 0.6;   // グリップを壁へ食い込ませる溶着代（union 確実化）
+
 // はめ合い後の値（実測 + 余裕）
 bat_t_fit  = bat_t + 1.0;   // バッテリー厚みは膨張ぶん +1mm（dimensions.md ルール）
 
 // 部品配置の前提（要確認の設計判断 — 下記 TODO 参照）
-bat_gap    = 0.5;           // カメラ面とバッテリー上面の仕切り
-// TODO[設計判断]: バッテリーは「基板スタックの背面に積層」を仮定している。
-//   横並びにする場合は cav_w/cav_h と battery 配置を切り替える。
-bat_off    = [0, 0];        // バッテリーの XY 微調整（cavity 中心基準）
+bat_gap    = max(0.6, shelf_t + 0.2);   // 基板下面とバッテリー上面の仕切り。下受け棚(shelf_t)ぶんを確保
+// バッテリーは基板の下(-Z)に積層。bat_l=32.7 が基板長 21.25 より長いので
+//   「頭合わせ」: バッテリー頭を基板頭(x=0)に揃え、尾(+X)へはみ出させる（#layout 決定）。
+bat_x0     = 0;                    // バッテリー頭の x（基板頭に合わせる）
+bat_y0     = board_w / 2 - bat_w / 2;  // 幅は中心合わせ
+bat_off    = [0, 0];              // バッテリーの XY 微調整（bat_x0/bat_y0 基準）
 
 // ===== Phase 1 追加計測（dimensions.md §7。実測で ASSUMED → MEASURED へ） =====
 // 【画像準拠の修正】カメラは折り返した FPC で「上面(+Z)」に立ち、レンズは +Z（真上）へ。
@@ -110,16 +127,25 @@ z_usb_top   = z_board_top + usb_h;
 z_cam_top   = cam_base_z + cam_t;   // カメラ基板 上面
 z_lens_top  = z_cam_top + lens_h;   // レンズ先端（+Z 最高点）= 天面壁を貫通して突出
 
-// ===== 派生：内部キャビティ寸法 =====
-// 基板と（積層した）バッテリーの両フットプリントを内包し、clr を足したもの。
-cav_l = max(board_l, bat_l) + 2 * clr;
-cav_w = max(board_w, bat_w) + 2 * clr;
+// ===== 派生：内部キャビティ寸法（基板＋バッテリーの footprint 包絡） =====
+// 頭合わせレイアウト: 頭(-X)は USB 突出 or バッテリー頭の手前、尾(+X)は
+//   基板尾 or バッテリー尾の奥。中心は両者の包絡中心（基板中心ではない）。
+foot_x0 = min(-usb_overhang, bat_x0);          // 頭側 端
+foot_x1 = max(board_l, bat_x0 + bat_l);        // 尾側 端
+foot_y0 = min(0, bat_y0);
+foot_y1 = max(board_w, bat_y0 + bat_w);
+cav_l = (foot_x1 - foot_x0) + 2 * clr;
+cav_w = (foot_y1 - foot_y0) + 2 * clr;
 // 内部はカメラ本体まで内包。レンズは天面壁を貫通させて外へ出す。
 cav_h = (max(z_cam_top, z_usb_top) - z_bat_bot) + 2 * clr;
 
-// キャビティ中心（基板フットプリント中心に揃える）
-cav_cx = board_l / 2;
-cav_cy = board_w / 2;
+// キャビティ中心（footprint 包絡の中心）
+cav_cx = (foot_x0 + foot_x1) / 2;
+cav_cy = (foot_y0 + foot_y1) / 2;
+
+// キャビティ外縁（リテンション／リップ／開口の配置基準）
+cav_x0 = cav_cx - cav_l / 2;  cav_x1 = cav_cx + cav_l / 2;
+cav_y0 = cav_cy - cav_w / 2;  cav_y1 = cav_cy + cav_w / 2;
 
 // 描画解像度。プレビューは粗く、書き出し(clip.scad の export)で上げる。
 $fn = $preview ? 32 : 96;

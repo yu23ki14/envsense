@@ -13,15 +13,38 @@ The Phase 1 OpenSCAD design skeleton exists in `clip/`:
 | `dimensions.md` | **Measured part dimensions** — the single source of truth for the reference values. |
 | `params.scad` | All measured values (variable names mirror dimensions.md) + clearance/wall/process knobs + derived Z layers and cavity dims. |
 | `parts.scad` | Mock of the internal parts (board / Sense board / camera / battery) used both for assembly fit-check and as the `difference()` negative. |
-| `enclosure.scad` | The shell: rounded outer box minus cavity minus openings (USB-C / lens / mic), split into `enclosure_bottom()` / `enclosure_top()` at z=0. |
+| `enclosure.scad` | The shell: rounded outer box minus cavity minus openings (USB-C / lens / mic), split into `enclosure_bottom()` / `enclosure_top()` at z=0. Also holds the board retention (4-corner clamps) and the `lip`/`groove` mating joint. |
 | `clip.scad` | Top-level. `mode` toggles assembly / shell / bottom / top / parts and drives CLI export. |
 
 When you edit OpenSCAD files, match the variable names exactly to the "OpenSCAD variable name"
 column in dimensions.md — `params.scad` already does this; keep it in sync.
 
-Open TODOs marked in the source: the lid/body mating lip & snap/screw bosses are not implemented
-yet (`lip_*` params exist), and the battery is assumed **stacked behind the board stack** — a
-side-by-side layout would change `cav_*` and the `battery()` placement.
+### Layout: head-aligned (battery is longer than the board)
+
+The LiPo (`bat_l` 32.7) is **longer than the main board** (`board_l` 21.25), so the cavity is the
+**bounding box of board ∪ battery**, not centered on the board (`cav_cx/cav_cy` derive from
+`foot_x0..foot_y1`). The board's USB/camera **head is aligned to one short end** (`bat_x0 = 0`)
+and the battery extends toward the tail (+X). This keeps the **USB-C port on the head end face** —
+`cut_usb` follows `cav_x0` (don't hardcode the wall x). Changing `bat_x0`/centering the battery
+will bury the USB port; re-check `cut_usb` if you touch the layout.
+
+### Board retention (screwless)
+
+The XIAO has no mounting holes and the board floats inside a battery-sized cavity, so it is held
+by **corner clamps** (`corner_grip`/`corner_grips`) plus a **tail backstop** (`tail_backstop`),
+matching common practice for this board (community cases are all screwless snap/sandwich designs).
+Each clamp grips only the **main board** at its corners (measured 1.8 mm component-free margin at
+all 4 corners; tune via `clamp_reach`/`clamp_run`). Because the board sits at the head, only the
+**head corners get both edges** (anchored to the near end wall); the **tail corners get the long-
+edge grip only**, and the `tail_backstop` wall takes the +X load (USB-plug insertion). The
+**Sense board has no margin and is never touched** — tail-side top retainers and the backstop stay
+inside the B2B gap (`top_h_rear < b2b_gap`). The shelf needs room under the board, so `bat_gap` is
+derived as `max(0.6, shelf_t + 0.2)`.
+
+Open TODOs: the **camera pocket / lens-bore alignment** still needs `cam_rot` (unmeasured in
+dimensions.md §7); a **wire/antenna notch** in `tail_backstop` once routing is decided; and screw
+bosses are intentionally omitted. Validate any geometry edit with a headless render
+(`Status: NoError` = watertight) — `openscad` is installed via the `openscad@snapshot` cask.
 
 ## Build / export (OpenSCAD)
 
