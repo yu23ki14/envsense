@@ -40,8 +40,10 @@ all 4 corners; tune via `clamp_reach`/`clamp_run`). Because the board sits at th
 **head corners get both edges** (anchored to the near end wall); the **tail corners get the long-
 edge grip only**, and the `tail_backstop` wall takes the +X load (USB-plug insertion). The
 **Sense board has no margin and is never touched** — tail-side top retainers and the backstop stay
-inside the B2B gap (`top_h_rear < b2b_gap`). The shelf needs room under the board, so `bat_gap` is
-derived as `max(0.6, shelf_t + 0.2)`.
+inside the B2B gap (`top_h_rear < b2b_gap`). The board↔battery gap `bat_gap` must clear both the
+retention shelf **and** the battery-lead solder joints on the underside BAT pads (which face the
+battery), so it is `max(shelf_t + 0.2, bat_lead_clr)` (= 1.6 mm). Pair with low-profile solder + a
+Kapton film on the battery top when wiring.
 
 Open TODOs: the **camera pocket / lens-bore alignment** still needs `cam_rot` (unmeasured in
 dimensions.md §7); a **wire/antenna notch** in `tail_backstop` once routing is decided; and screw
