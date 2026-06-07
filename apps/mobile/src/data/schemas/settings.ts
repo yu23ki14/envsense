@@ -11,6 +11,13 @@ export type CaptureSettings = z.infer<typeof CaptureSettings>;
 export const AudioSettings = z.object({
   autoRecord: z.boolean(),
   transcriptionModel: ModelRef,
+  // 文字起こしの言語ヒント。'auto' は whisper の自動判定。base モデルは短い音声の
+  // 自動判定が弱く日本語を崩しやすいので、既定は 'ja'。`.default` で旧データ
+  // （このキーが無い保存済み設定）もマイグレーションなしで読める。
+  transcriptionLanguage: z.string().default('ja'),
+  // ローカル文字起こしが未準備/失敗したときにクラウド(Groq)で補完するか。false なら
+  // 音声を端末外に出さない（＝ローカルのみ）。`.default` で旧データもマイグレーション不要。
+  cloudFallback: z.boolean().default(true),
 });
 export type AudioSettings = z.infer<typeof AudioSettings>;
 
@@ -55,7 +62,11 @@ export const DEFAULT_SETTINGS: Settings = {
   },
   audio: {
     autoRecord: true,
-    transcriptionModel: 'whisper.cpp:base',
+    // クラウド既定。ローカル whisper は #62 で実装するまで未対応なので、
+    // 足場段階では初期状態から動く Groq を既定にする。
+    transcriptionModel: 'groq:whisper-large-v3-turbo',
+    transcriptionLanguage: 'ja',
+    cloudFallback: true,
   },
   sync: {
     autoSyncMode: 'wifi',

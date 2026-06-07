@@ -51,10 +51,10 @@ module camera() {
             cylinder(d = lens_d, h = lens_h);
 }
 
-// ----- バッテリー（基板スタックの背面に積層） -----
+// ----- バッテリー（基板の下(-Z)に積層。頭合わせで尾(+X)へはみ出す） -----
 module battery() {
-    bx = cav_cx - bat_l / 2 + bat_off[0];
-    by = cav_cy - bat_w / 2 + bat_off[1];
+    bx = bat_x0 + bat_off[0];
+    by = bat_y0 + bat_off[1];
     color("SlateGray")
         translate([bx, by, z_bat_bot])
             cube([bat_l, bat_w, bat_t_fit]);

@@ -1,0 +1,23 @@
+diff --git a/android/src/main/java/com/margelo/nitro/dev/litert/litertlm/HybridLiteRTLM.kt b/android/src/main/java/com/margelo/nitro/dev/litert/litertlm/HybridLiteRTLM.kt
+index 9d7eed890a0c0be5394aec8182844d49bb3ee04f..220e3030d89de0011e1a815c66660530ffc08b9e 100644
+--- a/android/src/main/java/com/margelo/nitro/dev/litert/litertlm/HybridLiteRTLM.kt
++++ b/android/src/main/java/com/margelo/nitro/dev/litert/litertlm/HybridLiteRTLM.kt
+@@ -265,12 +265,16 @@ class HybridLiteRTLM : HybridLiteRTLMSpec() {
+                     val cacheDirectory = LiteRTLMInitProvider.applicationContext?.cacheDir?.absolutePath
+                     Log.i(TAG, "Using cache directory: $cacheDirectory")
+     
+-                    // Create Engine configuration — visionBackend/audioBackend are optional
++                    // Create Engine configuration — visionBackend/audioBackend are optional.
++                    // PATCH (envsense): for STT we only need audio. Forcing visionBackend = GPU()
++                    // makes multimodal init depend on OpenCL, which fails ("Failed to allocate
++                    // tensors") on devices with limited GPU/OpenCL drivers (e.g. Pixel 10 / Tensor
++                    // G5 PowerVR on old driver). Configure audio-only (omit visionBackend) so the
++                    // audio path runs without any GPU dependency.
+                     val engineConfig = if (isMultimodal) {
+                         EngineConfig(
+                             modelPath = modelPath,
+                             backend = lmBackend,
+-                            visionBackend = lmVisionBackend!!,
+                             audioBackend = lmAudioBackend!!,
+                             maxNumTokens = maxTokens,
+                             cacheDir = cacheDirectory

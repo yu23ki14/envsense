@@ -50,7 +50,7 @@ export function ListRow({
         ) : null}
       </View>
       {value ? (
-        <Text variant="caption" color="textMuted">
+        <Text variant="caption" color="textMuted" numberOfLines={1} style={styles.value}>
           {value}
         </Text>
       ) : null}
@@ -85,8 +85,17 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'center',
     backgroundColor: theme.colors.surfaceMuted,
   },
+  // タイトル列は自身の内容幅を保ち、余白があれば伸びるが縮まない。これにより
+  // 長い値がきても flexBasis:0 に潰れず、代わりに値側が縮む（下記 value）。
   texts: {
-    flex: 1,
+    flexGrow: 1,
+    flexShrink: 0,
+    flexBasis: 'auto',
     gap: 2,
+  },
+  // 長い値（モデル名など）はタイトルの幅を奪わずに 1 行で省略表示する。
+  value: {
+    flexShrink: 1,
+    textAlign: 'right',
   },
 }));

@@ -9,10 +9,49 @@ import { router } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { Card, ClipScreen, ListRow, SectionHeader } from '../components';
-import { secrets, usePairedDevice, useSettings } from '../data';
+import {
+  Card,
+  ClipScreen,
+  ListRow,
+  SectionHeader,
+  SettingSelectModal,
+  type SettingSelectOption,
+} from '../components';
+import { secrets, updateSettings, usePairedDevice, useSettings } from '../data';
 import { useDeviceContext } from '../modules/DeviceProvider';
+import {
+  localModelIdOf,
+  TRANSCRIPTION_MODELS,
+  transcriptionLabel,
+  useWhisperModel,
+} from '../modules/llm';
 import { Button, Icon, type IconName, Text, TextField } from '../ui';
+
+const KIND_GROUP: Record<'cloud' | 'local', string> = {
+  cloud: 'クラウド',
+  local: 'ローカル',
+};
+
+const TRANSCRIPTION_OPTIONS: SettingSelectOption<string>[] = TRANSCRIPTION_MODELS.map((m) => ({
+  value: m.ref,
+  label: m.label,
+  note: m.note,
+  group: KIND_GROUP[m.kind],
+}));
+
+const LANGUAGE_OPTIONS: SettingSelectOption<string>[] = [
+  { value: 'ja', label: '日本語' },
+  { value: 'en', label: 'English' },
+  {
+    value: 'auto',
+    label: '自動判定',
+    note: 'whisper に言語を推定させる（短い音声では精度が落ちることがあります）',
+  },
+];
+
+function languageLabel(value: string): string {
+  return LANGUAGE_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
 
 function autoSyncLabel(mode: 'wifi' | 'always' | 'manual'): string {
   switch (mode) {
@@ -29,6 +68,9 @@ export function DeviceScreen() {
   const settings = useSettings();
   const paired = usePairedDevice();
   const { device: liveDevice, status, connect, disconnect } = useDeviceContext();
+  const [transcriptionModalOpen, setTranscriptionModalOpen] = useState(false);
+  const [languageModalOpen, setLanguageModalOpen] = useState(false);
+  const selectedModelId = localModelIdOf(settings.audio.transcriptionModel);
 
   const isLive = liveDevice != null;
   const headerSubtitle =
@@ -140,9 +182,35 @@ export function DeviceScreen() {
             <RowDivider />
             <ListRow
               icon="ear"
-              title="文字起こしモデル"
-              value={settings.audio.transcriptionModel}
-              onPress={() => undefined}
+              title={'文字起こし\nモデル'}
+              value={transcriptionLabel(settings.audio.transcriptionModel)}
+              onPress={() => setTranscriptionModalOpen(true)}
+            />
+            {selectedModelId != null ? (
+              <>
+                <RowDivider />
+                <LocalModelRow modelId={selectedModelId} />
+                <RowDivider />
+                <ListRow
+                  icon="cloud"
+                  title="クラウド補完"
+                  description="ローカル失敗時に Groq で文字起こし"
+                  value={settings.audio.cloudFallback ? 'オン' : 'オフ'}
+                  onPress={() =>
+                    updateSettings((s) => ({
+                      ...s,
+                      audio: { ...s.audio, cloudFallback: !s.audio.cloudFallback },
+                    }))
+                  }
+                />
+              </>
+            ) : null}
+            <RowDivider />
+            <ListRow
+              icon="globe"
+              title="文字起こし言語"
+              value={languageLabel(settings.audio.transcriptionLanguage)}
+              onPress={() => setLanguageModalOpen(true)}
             />
           </Card>
         </View>
@@ -197,7 +265,69 @@ export function DeviceScreen() {
           </Button>
         </View>
       </View>
+
+      <SettingSelectModal
+        visible={transcriptionModalOpen}
+        title="文字起こしモデル"
+        options={TRANSCRIPTION_OPTIONS}
+        value={settings.audio.transcriptionModel}
+        onSelect={(ref) =>
+          updateSettings((s) => ({ ...s, audio: { ...s.audio, transcriptionModel: ref } }))
+        }
+        onClose={() => setTranscriptionModalOpen(false)}
+      />
+
+      <SettingSelectModal
+        visible={languageModalOpen}
+        title="文字起こし言語"
+        options={LANGUAGE_OPTIONS}
+        value={settings.audio.transcriptionLanguage}
+        onSelect={(language) =>
+          updateSettings((s) => ({ ...s, audio: { ...s.audio, transcriptionLanguage: language } }))
+        }
+        onClose={() => setLanguageModalOpen(false)}
+      />
     </ClipScreen>
+  );
+}
+
+/**
+ * 選択中のローカル (Cactus) モデルのダウンロード状態を表示する行。
+ * 未 DL の間はクラウドにフォールバックして動作する。
+ */
+function LocalModelRow({ modelId }: { modelId: string }) {
+  const { status, progress, error, download } = useWhisperModel(modelId);
+
+  let detail = 'オフライン文字起こしに必要';
+  if (status === 'unknown') detail = '確認中…';
+  else if (status === 'downloading') detail = `ダウンロード中 ${Math.round(progress * 100)}%`;
+  else if (status === 'ready') detail = '準備完了・オフライン可';
+  else if (error != null) detail = error;
+
+  return (
+    <View style={styles.modelRow}>
+      <View style={styles.modelHead}>
+        <View style={styles.modelIcon}>
+          <Icon name="cpu" size={20} color="textMuted" />
+        </View>
+        <View style={styles.modelTexts}>
+          <Text variant="label">ローカルモデル</Text>
+          <Text variant="caption" color={error != null ? 'error' : 'textMuted'}>
+            {detail}
+          </Text>
+        </View>
+        {status === 'absent' ? (
+          <Button size="sm" variant="outline" onPress={download}>
+            ダウンロード
+          </Button>
+        ) : null}
+      </View>
+      {status === 'downloading' ? (
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} />
+        </View>
+      ) : null}
+    </View>
   );
 }
 
@@ -358,5 +488,38 @@ const styles = StyleSheet.create((theme) => ({
   actions: {
     paddingHorizontal: theme.spacing.lg,
     paddingTop: theme.spacing.sm,
+  },
+  modelRow: {
+    paddingHorizontal: theme.spacing.md,
+    paddingVertical: theme.spacing.sm,
+    gap: theme.spacing.sm,
+  },
+  modelHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+  },
+  modelIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: theme.radius[8],
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.colors.surfaceMuted,
+  },
+  modelTexts: {
+    flex: 1,
+    gap: 2,
+  },
+  progressTrack: {
+    height: 4,
+    borderRadius: theme.radius[8],
+    backgroundColor: theme.colors.border,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: 4,
+    borderRadius: theme.radius[8],
+    backgroundColor: theme.colors.primary,
   },
 }));
