@@ -82,17 +82,35 @@ module cut_touch_pad() {
                     square(touch_pad_size - 2 * touch_pad_r, center = true);
 }
 
-// シェル本体（分割前）: 外形 − キャビティ − 各開口、その後に基板リテンションを union。
+// 配線通しノッチ: tail_backstop を上端から欠く上開きスリット。
+// 先に配線（両端固定）した電池リードを、組込み時に上から落とし込めるようにする。
+// backstop は基板尾の直後に立つので、その壁を Y 窓で全高カット（上下に開放）。
+module cut_wire_notch() {
+    if (wire_notch) {
+        x0 = board_l + clr;                         // backstop 前面
+        z0 = (z_board_bot - shelf_t) - 1;           // 壁下より少し下（線が電池へ抜ける）
+        z1 = (z_board_top + top_h_rear) + 1;        // 壁上より上（=上開き）
+        translate([x0 - 1, wire_notch_y - wire_notch_w / 2, z0])
+            cube([wall + 2, wire_notch_w, z1 - z0]);
+    }
+}
+
+// シェル本体（分割前）: 外形 − キャビティ − 各開口、リテンションを union、最後に配線ノッチを欠く。
 module pebble_shell_solid() {
     difference() {
-        pebble_outer_solid();
-        cavity();
-        cut_usb_peb();
-        cut_lens();
-        cut_mic();
-        cut_touch_pad();   // 天面内側のタッチ電極座
+        union() {
+            difference() {
+                pebble_outer_solid();
+                cavity();
+                cut_usb_peb();
+                cut_lens();
+                cut_mic();
+                cut_touch_pad();   // 天面内側のタッチ電極座
+            }
+            corner_grips();   // キャビティ減算後に union（隅クランプは意図的にキャビティ内へ張り出す）
+        }
+        cut_wire_notch();     // tail_backstop に配線通しスリット（リテンション union 後に欠く）
     }
-    corner_grips();   // キャビティ減算後に union（隅クランプは意図的にキャビティ内へ張り出す）
 }
 
 // =====================================================================
