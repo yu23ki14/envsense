@@ -74,7 +74,8 @@ via `use`. Only the outer shell is replaced and the clip is added.
   - **Spring (selected): MonotaRO 33-0444** (confirmed spec) — torsion, **SUS304-WPB**, wire 0.6 / ID 4 /
     **OD 5.2** / free angle 135° / 3.125 turns / **arm(leg) 16 mm** / **working angle 57°** / **RH wound** /
     RoHS / rate 0.457 N·mm/° → design torque ≈ 26 N·mm. Same-mount stiffer swap: 33-0441. The hinge is sized
-    to it: **pin Ø3.6** (rod through the ID-4 coil), pin dropped `clip_pin_drop` so the OD-5.2 coil clears the
+    to it: **pin Ø3.0** (FDM proto: easy-to-source φ3 rod / M3 through the ID-4 coil, ~0.5 mm play — go Ø3.5
+    for the final to tighten it), pin dropped `clip_pin_drop` so the OD-5.2 coil clears the
     back, plus a **body-side leg anchor** (`clip_leg_anchor_body`, routed into the **-Y boss** — NOT +Z, since
     the 1.6 mm back wall would otherwise be punched through into the battery cavity) and an **arm-side leg
     slot**. Spring values live in `params_pebble.scad` (`clip_spring_*`). Pin and spring are off-the-shelf
