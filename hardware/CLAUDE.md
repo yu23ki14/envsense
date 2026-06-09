@@ -45,9 +45,20 @@ retention shelf **and** the battery-lead solder joints on the underside BAT pads
 battery), so it is `max(shelf_t + 0.2, bat_lead_clr)` (= 1.6 mm). Pair with low-profile solder + a
 Kapton film on the battery top when wiring.
 
+**The `tail_backstop` belongs to the TOP half, not the bottom.** Because the battery is hard-wired
+to the board (a soldered board+battery unit, both larger than nothing-but-the-board) and drops into
+the bottom tub, a full-width tail wall in the bottom would block insertion. So `corner_grips()` does
+**not** call `tail_backstop()`; instead `enclosure_top()` / `pebble_enclosure_top()` union it
+**outside** the `z>0` intersection so its `z<0` portion survives and reaches down to the board tail
+edge. Closing the lid lowers the backstop across `z=0` to lock the board in +X; a `-X` lead-in
+chamfer (`ch`) nudges a +X-drifted board back. It is a centred segment (`backstop_w`, not full
+`cav_w`) so the tail tub stays open for the battery. Assembly order: drop battery+board into the
+open bottom, route leads, then close the top.
+
 Open TODOs: the **camera pocket / lens-bore alignment** still needs `cam_rot` (unmeasured in
-dimensions.md §7); a **wire/antenna notch** in `tail_backstop` once routing is decided; and screw
-bosses are intentionally omitted. Validate any geometry edit with a headless render
+dimensions.md §7); and screw bosses are intentionally omitted. The **wire/antenna notch** in
+`tail_backstop` is now implemented (`cut_wire_notch`, applied in `pebble_enclosure_top` since the
+backstop moved to the top). Validate any geometry edit with a headless render
 (`Status: NoError` = watertight) — `openscad` is installed via the `openscad@snapshot` cask.
 
 ### pebble variant (product-shaped outer + back clip)
