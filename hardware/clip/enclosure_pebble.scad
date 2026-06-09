@@ -26,6 +26,18 @@ module superellipse2d(a, b, n, seg = 64) {
     polygon([for (i = [0:seg - 1]) se_pt(360 * i / seg, a, b, n)]);
 }
 
+// X 方向に伸びる角丸バー（断面 = YZ 平面の角丸矩形。USB 開口用）。
+//   wy=幅(Y) / hz=高さ(Z) / r=コーナー半径（min(wy,hz)/2 で full radius=スタジアム形）。
+//   原点から +X へ len 伸び、断面は (peb_cy, zc) 等の translate 側で位置決め。
+module rbar_x(len, wy, hz, r) {
+    rr = min(r, wy / 2, hz / 2);
+    rotate([0, 90, 0])
+        linear_extrude(height = len)
+            hull() for (a = [-1, 1], b = [-1, 1])
+                translate([a * (hz / 2 - rr), b * (wy / 2 - rr)])
+                    circle(r = rr, $fn = 48);
+}
+
 // =====================================================================
 // 外形ソリッド（石モチーフ）
 // =====================================================================
@@ -63,12 +75,12 @@ module cut_usb_peb() {
     x_out  = (peb_cx - peb_l / 2) - 3;     // 石頭の外側（確実に外面より外）
     x_slot = usb_body_l + 1;               // 受け口を貫く奥
     well_d = (-usb_overhang) - usb_well_clr - x_out;   // ザグリ深さ（受け口前面の手前まで）
-    // 金属スロット（全長）
-    translate([x_out, peb_cy - usb_plug_w / 2, z0])
-        cube([x_slot - x_out, usb_plug_w, usb_plug_h]);
-    // オーバーモールド・ザグリ（外側・大きめ）
-    translate([x_out, peb_cy - usb_well_w / 2, zc - usb_well_h / 2])
-        cube([well_d, usb_well_w, usb_well_h]);
+    // 金属スロット（全長・断面 full radius）。zc が断面中心。
+    translate([x_out, peb_cy, zc])
+        rbar_x(x_slot - x_out, usb_plug_w, usb_plug_h, min(usb_plug_w, usb_plug_h) / 2);
+    // オーバーモールド・ザグリ（外側・断面 full radius）。スロットを内包する大きさ。
+    translate([x_out, peb_cy, zc])
+        rbar_x(well_d, usb_well_w, usb_well_h, min(usb_well_w, usb_well_h) / 2);
 }
 
 // 静電タッチ電極（銅箔）座: 天面内側(キャビティ天井 z=cav_top_z)に浅い角丸ポケット。
@@ -95,22 +107,18 @@ module cut_wire_notch() {
     }
 }
 
-// シェル本体（分割前）: 外形 − キャビティ − 各開口、リテンションを union、最後に配線ノッチを欠く。
+// シェル本体（分割前）: 外形 − キャビティ − 各開口、リテンションを union。
+//   配線ノッチは tail_backstop（=トップ所属）に欠くので、ここではなく pebble_enclosure_top で。
 module pebble_shell_solid() {
     difference() {
-        union() {
-            difference() {
-                pebble_outer_solid();
-                cavity();
-                cut_usb_peb();
-                cut_lens();
-                cut_mic();
-                cut_touch_pad();   // 天面内側のタッチ電極座
-            }
-            corner_grips();   // キャビティ減算後に union（隅クランプは意図的にキャビティ内へ張り出す）
-        }
-        cut_wire_notch();     // tail_backstop に配線通しスリット（リテンション union 後に欠く）
+        pebble_outer_solid();
+        cavity();
+        cut_usb_peb();
+        cut_lens();
+        cut_mic();
+        cut_touch_pad();   // 天面内側のタッチ電極座
     }
+    corner_grips();        // キャビティ減算後に union（隅クランプは意図的にキャビティ内へ張り出す）
 }
 
 // =====================================================================
@@ -293,12 +301,16 @@ module pebble_enclosure_bottom() {
 module pebble_enclosure_top() {
     big = 300;
     difference() {
-        intersection() {
-            pebble_shell_solid();
-            translate([peb_cx - big / 2, peb_cy - big / 2, 0]) cube([big, big, big]);
+        union() {
+            intersection() {
+                pebble_shell_solid();
+                translate([peb_cx - big / 2, peb_cy - big / 2, 0]) cube([big, big, big]);
+            }
+            tail_backstop();   // 板尾止め（z=0 をまたいで下へ突出。トップ所属）
         }
         mating_groove();       // 舌を受ける溝
         snap_pockets();        // ビードを受ける係止ポケット
+        cut_wire_notch();      // backstop に配線通しスリット（中央を Y 窓で開放）
     }
 }
 

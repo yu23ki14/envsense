@@ -106,13 +106,25 @@ module corner_grip(bx, by, top_h, do_edgeB = true) {
 
 // 尾(+X)バックストップ: 基板尾の直後に立てる横断壁。基板の +X 移動止め
 //   （USB プラグ押し込み力の受け）を兼ねる。Sense に当てないよう B2B 隙間内の高さ。
+//   ★所属は「トップ半身」: ボトム底タブの尾側を完全に空けて電池(直結・基板より大)の
+//     傾け入れ路を確保し、蓋を閉じると z=0 をまたいで下へ降り基板尾を押さえる。
+//     enclosure_top() / pebble_enclosure_top() で intersection の外に union する
+//     （z<0 部を残すため）。corner_grips() からは呼ばない。
+//   先端(-X下)に面取り = 閉合時に基板が +X へずれていても -X へ誘い戻す。
 module tail_backstop() {
     x0 = board_l + clr;                  // 基板尾の clr 後ろ
-    z0 = z_board_bot - shelf_t;
+    z0 = z_board_bot;                    // 基板下面まで（尾エッジを全厚で受ける）
     z1 = z_board_top + top_h_rear;       // < b2b_gap（Sense 下面に当てない）
-    // TODO[配線]: バッテリーリード/アンテナの取り回しが決まったらノッチを開ける
-    translate([x0, cav_y0 - weld, z0])
-        cube([wall, cav_w + 2 * weld, z1 - z0]);
+    ch = 1.0;                            // 先端誘い込み面取り
+    translate([x0, cav_cy - backstop_w / 2, z0])
+        difference() {
+            cube([wall, backstop_w, z1 - z0]);
+            // -X 下エッジを 45° で削ぐ（XZ 三角柱を Y へ押し出し）
+            translate([0, backstop_w, 0])
+                rotate([90, 0, 0])
+                    linear_extrude(height = backstop_w)
+                        polygon([[0, 0], [ch, 0], [0, ch]]);
+        }
 }
 
 module corner_grips() {
@@ -120,18 +132,29 @@ module corner_grips() {
         is_head = c[0] < cav_cx;        // 頭(USB側)隅か
         corner_grip(c[0], c[1], is_head ? top_h_front : top_h_rear, is_head);
     }
-    tail_backstop();
+    // tail_backstop() はトップ半身に所属（enclosure_top で union）。ここでは呼ばない。
 }
 
 // ----- 合わせ目リップ（印籠） -----
 // 本体(bottom)から z=0 で立ち上がる舌（tongue）。蓋(top)側は mating_groove で受ける。
 module mating_lip() {
-    linear_extrude(height = lip_h)
-        translate([cav_x0, cav_y0])
+    lead = 0.8;   // 先端リードの高さ（細い首で溝へ誘い込む＝片側ずつ入れずに済む）
+    led  = 0.4;   // 先端を各面で絞る量（先端だけ薄く）
+    translate([cav_x0, cav_y0]) {
+        // 本体（フル厚）
+        linear_extrude(height = lip_h - lead)
             difference() {
                 offset(r = lip_t) rrect2d(cav_l, cav_w, corner_r);
                 rrect2d(cav_l, cav_w, corner_r);
             }
+        // 先端リード（両面を led 絞って細く＝溝口への誘い込みノーズ）
+        translate([0, 0, lip_h - lead])
+            linear_extrude(height = lead)
+                difference() {
+                    offset(r = lip_t - led) rrect2d(cav_l, cav_w, corner_r);
+                    offset(r = led) rrect2d(cav_l, cav_w, corner_r);
+                }
+    }
 }
 
 module mating_groove() {
@@ -185,10 +208,13 @@ module enclosure_bottom() {
 module enclosure_top() {
     big = 200;
     difference() {
-        intersection() {
-            shell_solid();
-            translate([cav_cx - big/2, cav_cy - big/2, 0]) cube([big, big, big]);
+        union() {
+            intersection() {
+                shell_solid();
+                translate([cav_cx - big/2, cav_cy - big/2, 0]) cube([big, big, big]);
+            }
+            tail_backstop();   // 板尾止め（z=0 をまたいで下へ突出。トップ所属）
         }
-        mating_groove();   // 舌を受ける溝
+        mating_groove();       // 舌を受ける溝
     }
 }
