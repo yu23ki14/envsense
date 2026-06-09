@@ -1,9 +1,9 @@
 import { File } from 'expo-file-system';
 import { decodeAudioData } from 'react-native-audio-api';
 import {
-  checkBackendSupport,
   createLLM,
   GEMMA_4_E2B_IT,
+  GEMMA_4_E4B_IT,
   type LiteRTLMInstance,
 } from 'react-native-litert-lm';
 import { absoluteUri, deleteFile, writeBytes } from '../../../../data';
@@ -13,11 +13,46 @@ import type { WhisperEngine, WhisperEngineResult } from './types';
 
 const SAMPLE_RATE = 16000;
 
+// 音声プレフィルが確保するトークン予算。LiteRT-LM の maxNumTokens は「入力(=音声トークン)
+// ＋出力」の総枠で、ラッパー既定の 1024 では Gemma 4 E2B の音声プレフィルで
+// `Failed to allocate tensors`(RunPrefillAsync) になる。動作実績のある公式/コミュニティ例
+// (Edge Gallery 系)は 4096 を使うため、それに合わせる。
+const MAX_TOKENS = 4096;
+
+// GPU(OpenCL) は loadModel が通っても音声推論で固まる端末がある（PowerVR/Mali 等。onDone/onError
+// が来ず Promise が解決しない）。エラーを投げないので時間で打ち切り CPU にフォールバックする。
+// GPU が動く場合 prefill は数秒で終わる（公式報告で ~426 tok/s）。動かない端末は無言ハングする
+// ので、それを十分に超える 60s で打ち切って CPU にフォールバックする。
+const GPU_INFERENCE_TIMEOUT_MS = 60000;
+
+class InferenceTimeoutError extends Error {}
+
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new InferenceTimeoutError(`${label} timed out (${ms}ms)`)),
+      ms,
+    );
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 // ローカルは Gemma 4 E2B（音声マルチモーダル）。modelId → ダウンロード URL / 保存ファイル名。
 // 注: GPU は Pixel 10(Tensor G5/PowerVR) では PowerVR ドライバ v25.1(Android16 QPR3)以降で
 // OpenCL がフル機能になる。古いドライバだとプレフィルのテンソル確保に失敗する。
 const MODEL: Record<string, { url: string; file: string }> = {
   'gemma-4-e2b': { url: GEMMA_4_E2B_IT, file: 'gemma-4-E2B-it.litertlm' },
+  // E4B は E2B より高精度だがメモリ・DL が大きい（~3.65GB）。Pixel 10 は RAM 十分。
+  'gemma-4-e4b': { url: GEMMA_4_E4B_IT, file: 'gemma-4-E4B-it.litertlm' },
 };
 
 // DL 済みモデルの絶対パスを MMKV に記録する。LiteRT-LM に公開の存在判定が無いため、
@@ -39,12 +74,13 @@ function getLlm(): LiteRTLMInstance {
   return llm;
 }
 
-// GPU(OpenCL) 推論が割り当て失敗する端末があるため、一度失敗したら CPU に切り替えて固定する。
+// GPU(OpenCL/Metal) 推論が失敗する端末があるため、一度失敗したら CPU に切り替えて固定する。
 let forceCpu = false;
-// gpu(OpenCL) が使える端末（Pixel 等）は gpu、非対応端末（多くの Samsung/Qualcomm）は cpu。
+// まず GPU を試す（iOS=Metal, Android=OpenCL）。checkBackendSupport('gpu') は Android では端末を
+// 問わず常に注意文を返す静的判定で、実機の OpenCL を見ない（Pixel でも cpu になってしまう）ため
+// 使わない。実際の可否はネイティブ loadModel の OpenCL プローブに委ね、失敗時は CPU に落とす。
 function pickBackend(): 'gpu' | 'cpu' {
-  if (forceCpu) return 'cpu';
-  return checkBackendSupport('gpu') == null ? 'gpu' : 'cpu';
+  return forceCpu ? 'cpu' : 'gpu';
 }
 
 let loadedModel: string | null = null;
@@ -59,8 +95,19 @@ async function ensureLoaded(modelId: string): Promise<LiteRTLMInstance> {
     throw new ModelUnavailableError(`ローカルモデル未準備: ${modelId}`);
   }
   // DL 済みファイルのパスからロード（URL を渡さないので転写中に勝手に再DLされない）。
+  // maxTokens を明示しないとラッパー既定(1024)になり、音声プレフィルでテンソル確保に失敗する。
+  // 文字起こしは決定論的タスクなので greedy デコードにする。ラッパー既定(temperature=0.7,
+  // topK=40)だと“創造的に”サンプリングして語句が崩れる（「アートモデル」等の幻覚・余分な空白）。
+  // topK=1 で常に最尤トークンを選ばせ（= greedy）、temperature は 0 に倒して揺らぎを消す。
   console.info(`[litert] loadModel backend=${backend}`);
-  await m.loadModel(path, { backend, multimodal: true });
+  await m.loadModel(path, {
+    backend,
+    multimodal: true,
+    maxTokens: MAX_TOKENS,
+    temperature: 0,
+    topK: 1,
+    topP: 1,
+  });
   loadedModel = modelId;
   loadedBackend = backend;
   return m;
@@ -107,7 +154,9 @@ async function transcribeFile(
   opts?: { language?: string },
 ): Promise<WhisperEngineResult> {
   // Ogg/Opus → 16kHz mono PCM（iOS が Ogg を復号できないので audio-api の自前デコーダ）→ WAV。
-  // Gemma の音声入力はファイルパス(WAV)なので一時 WAV を書き出して渡す。
+  // 音声は WAV ファイルパス(Content.AudioFile)で渡す。生 PCM を ArrayBuffer で渡す
+  // sendMultimodalMessage は、ラッパーが Promise.parallel(別スレッド)内で JS 所有 ArrayBuffer を
+  // 触るため `size() can only be accessed synchronously on the JS Thread` で落ちる。
   console.info(`[litert] decode start: ${relativePath}`);
   const audio = await decodeAudioData(absoluteUri(relativePath), SAMPLE_RATE);
   const wavRel = relativePath.replace(/\.ogg$/, '.wav');
@@ -119,7 +168,12 @@ async function transcribeFile(
     m.resetConversation(); // セグメントごとに独立（履歴を持ち越さない）
     console.info(`[litert] transcribe start (backend=${loadedBackend})`);
     const started = Date.now();
-    const text = await m.sendMessageWithAudio(transcriptionPrompt(opts?.language), wavPath);
+    const infer = m.sendMessageWithAudio(transcriptionPrompt(opts?.language), wavPath);
+    // GPU はハングしうるので時間で打ち切る。CPU は信頼できるので待ち切る。
+    const text =
+      loadedBackend === 'gpu'
+        ? await withTimeout(infer, GPU_INFERENCE_TIMEOUT_MS, 'gpu transcribe')
+        : await infer;
     console.info(
       `[litert] transcribe done (${loadedBackend}, ${Date.now() - started}ms): "${(text ?? '').slice(0, 60)}"`,
     );
@@ -130,13 +184,18 @@ async function transcribeFile(
     try {
       return { text: await runOnce() };
     } catch (err) {
-      // GPU(OpenCL/PowerVR ドライバ等)でテンソル確保に失敗する端末があるため、初回失敗時は
-      // CPU に切り替えて作り直して 1 度だけ再試行する（以後は CPU 固定）。
-      if (!forceCpu && loadedBackend === 'gpu') {
-        console.warn(`[litert] GPU inference failed, falling back to CPU: ${String(err)}`);
+      // GPU(OpenCL 未対応 / PowerVR ドライバ等)では loadModel の OpenCL プローブや推論で失敗する。
+      // forceCpu でない＝まだ GPU を試している段階なので、初回失敗時は CPU に切り替えて 1 度だけ
+      // 再試行する（loadModel 段階の失敗でも loadedBackend に依存せず確実に CPU へ落とす）。
+      if (!forceCpu) {
+        console.warn(`[litert] GPU path failed, falling back to CPU: ${String(err)}`);
         forceCpu = true;
         loadedModel = null;
         loadedBackend = null;
+        // ハング時は GPU engine が裏で生きたまま。同じインスタンスで loadModel(cpu) すると
+        // cleanupInternal が稼働中の engine を close して native がクラッシュしうるので、
+        // インスタンスごと破棄して CPU 用に作り直す（ハングした GPU engine は孤立させる）。
+        if (err instanceof InferenceTimeoutError) llm = null;
         return { text: await runOnce() };
       }
       throw err;

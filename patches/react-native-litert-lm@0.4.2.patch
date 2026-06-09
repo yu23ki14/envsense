@@ -21,3 +21,16 @@ index 9d7eed890a0c0be5394aec8182844d49bb3ee04f..220e3030d89de0011e1a815c66660530
                              audioBackend = lmAudioBackend!!,
                              maxNumTokens = maxTokens,
                              cacheDir = cacheDirectory
+diff --git a/package.json b/package.json
+index adbf6a30f56ef72f05f5e074f0ced9696e036043..4eacbf8f70d27ecd5710f02e0a6f5f2c07f39354 100644
+--- a/package.json
++++ b/package.json
+@@ -3,7 +3,7 @@
+   "version": "0.4.2",
+   "litertLm": {
+     "version": "0.12.0",
+-    "androidMavenVersion": "0.12.0",
++    "androidMavenVersion": "0.13.1",
+     "iosGitTag": "v0.12.0"
+   },
+   "description": "High-performance LLM inference for React Native using LiteRT-LM. Optimized for Gemma 4 and other on-device language models.",

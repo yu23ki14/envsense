@@ -16,8 +16,10 @@ export type ModelOption = {
   note?: string;
 };
 
-const LOCAL_NOTE =
-  'オンデバイス GPU (Gemma 4)・要モデルDL ~2.6GB（未DL/非対応時はクラウドにフォールバック）';
+const LOCAL_NOTE_E2B =
+  'オンデバイス GPU (Gemma 4 E2B)・要モデルDL ~2.6GB（未DL/非対応時はクラウドにフォールバック）';
+const LOCAL_NOTE_E4B =
+  'オンデバイス GPU (Gemma 4 E4B)・E2Bより高精度・要モデルDL ~3.7GB / メモリ多め（未DL/非対応時はクラウドにフォールバック）';
 
 export const TRANSCRIPTION_MODELS: ModelOption[] = [
   {
@@ -28,11 +30,19 @@ export const TRANSCRIPTION_MODELS: ModelOption[] = [
   },
   {
     ref: 'litert:gemma-4-e2b',
-    label: 'ローカル (Gemma 4・GPU)',
+    label: 'ローカル (Gemma 4 E2B・GPU)',
     kind: 'local',
     task: 'transcription',
     modelId: 'gemma-4-e2b',
-    note: LOCAL_NOTE,
+    note: LOCAL_NOTE_E2B,
+  },
+  {
+    ref: 'litert:gemma-4-e4b',
+    label: 'ローカル (Gemma 4 E4B・GPU・高精度)',
+    kind: 'local',
+    task: 'transcription',
+    modelId: 'gemma-4-e4b',
+    note: LOCAL_NOTE_E4B,
   },
 ];
 

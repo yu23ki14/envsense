@@ -85,16 +85,31 @@ on iOS Metal. We chose this after whisper.rn (Android GPU is iOS-only → CPU-sl
 on RN 0.83) both proved unworkable — see git history.
 
 Pipeline (platform-split engine, BLE-style dynamic import in `whisper/index.ts`;
-`engine.native.ts` = LiteRT, `engine.web.ts` = stub): the device streams Opus, but Gemma's audio
-input is a **WAV file path** and iOS can't decode Ogg/Opus at the OS level — so `engine.native.ts`
-decodes Ogg→PCM with `react-native-audio-api`'s `decodeAudioData`, writes a temp 16 kHz mono WAV
-(via the data layer), and calls `llm.sendMessageWithAudio(prompt, wavPath)`. The Gemma model
-(`gemma-4-e2b`, ~2.6 GB) is **not bundled** — LiteRT downloads it on first use (`loadModel(url, …,
-onProgress)`, cached), and readiness is tracked via an MMKV flag (`litert:model-ready:<id>`) since
-there's no public exists-check. Until downloaded (or on non-GPU devices where you may prefer cloud),
+`engine.native.ts` = LiteRT, `engine.web.ts` = stub): the device streams Opus, but iOS can't
+decode Ogg/Opus at the OS level — so `engine.native.ts` decodes Ogg→PCM with
+`react-native-audio-api`'s `decodeAudioData`, converts it to **raw 16 kHz mono 16-bit PCM**
+(`floatToPcm16`, no WAV header), and passes it as a zero-copy `ArrayBuffer` via
+`llm.sendMultimodalMessage([{type:'audio', audioBuffer}, {type:'text', text: prompt}])`
+(LiteRT `Content.AudioBytes`). We use raw PCM bytes, **not** a WAV file path
+(`sendMessageWithAudio`/`Content.AudioFile`): with Gemma 4 E2B the WAV-file path failed at prefill
+with `Failed to allocate tensors (RunPrefillAsync)`. The other half of that fix is `maxTokens:
+4096` in `loadModel` (LiteRT `maxNumTokens` is the *input+output* budget; the wrapper default of
+1024 is too small for audio-token prefill — Gemma 4 E2B's audio executor is bundled in the
+`.litertlm` and loaded on demand). The `react-native-litert-lm@0.4.2` patch
+(`patches/`) drops `visionBackend` so audio-only multimodal init doesn't depend on OpenCL. **This
+Gemma-4-on-GPU path is unverified on a real Pixel — see issue #66** (acceptance needs Android 16
+QPR3 / PowerVR driver v25.1); until confirmed, `transcribe()` falls back to cloud Groq. The Gemma model
+(`gemma-4-e2b`, ~2.6 GB) is **not bundled** — LiteRT downloads it on first use (`downloadModel`,
+cached), and readiness is tracked by storing the downloaded file's absolute path in MMKV
+(`litert:model-path:<id>`) and checking the file still exists, since there's no public exists-check
+(a bare flag desyncs if the cache is cleared). Until downloaded (or on non-GPU devices where you may prefer cloud),
 `isAvailable()` is false and `transcribe()` falls back to cloud, so the pipeline never stalls.
-Backend is chosen with `checkBackendSupport('gpu')` (gpu when available, else cpu). Local
-transcription is serialized (one segment at a time) with bounded retry. Native deps
+Backend selection (`pickBackend`): always **attempt GPU first** (Metal on iOS, OpenCL on Android),
+then fall back to CPU on the first failure and stick to CPU for the session (`forceCpu`). We do
+**not** gate on `checkBackendSupport('gpu')` — on Android it's a static advisory that always warns
+regardless of device, so it would pin even Pixels to CPU; the real OpenCL probe lives in the native
+`loadModel`, and the fallback in `transcribeFile` catches both load-time and inference-time GPU
+failures. Local transcription is serialized (one segment at a time) with bounded retry. Native deps
 (`react-native-litert-lm`, `react-native-audio-api`, `react-native-worklets`) require an
 `expo prebuild` + EAS dev build rebuild; the `react-native-litert-lm` config plugin sets Android
 minSdk 26 / Kotlin, and `react-native-worklets/plugin` must be the last Babel plugin.
