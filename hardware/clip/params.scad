@@ -82,12 +82,17 @@ clamp_reach   = 1.0;   // 基板縁への被さり量。clamp_reach + clr < boar
 clamp_run     = 2.5;   // 角から各辺に沿うグリップ長さ（USB/カメラ等を避ける範囲）
 shelf_t       = 0.8;   // 下受け棚の厚み(z)。bat_gap 以下に収める
 top_h_front   = 2.5;   // 前(USB側)2隅の上押さえ高さ。上方が空くので高め可
-top_h_rear    = 2.0;   // 後(Sense側)2隅の上押さえ高さ。B2B 隙間内(< b2b_gap)に収める
+// 後(Sense側)2隅の上押さえは廃止（旧 top_h_rear）: Sense が主基板尾を全幅で覆い、
+//   蓋の垂直降下で Sense 上面に衝突して閉じられないため。浮き上がりは tail_backstop
+//   のひさしで制限する（enclosure.scad の corner_grips / tail_backstop 参照）。
 board_top_gap = 0.5;   // 押さえ爪を上へ平行移動する量＝基板上面との隙間（爪厚 top_h は維持）。
-                       //   後隅は押さえ天(z1=z_board_top+board_top_gap+top_h_rear=2.5) が B2B 隙間(2.7)内に収まること
+                       //   後隅の爪は廃止済みなので実質前(USB側)2隅のみに効く
 weld          = 0.6;   // グリップを壁へ食い込ませる溶着代（union 確実化）
-// 尾(+X)バックストップはトップ半身に所属し全幅で両側壁へ接地する（enclosure.scad の
-//   tail_backstop 参照）。電池の挿入路はボトム底タブが開いているので幅を絞る必要はない。
+// 尾(+X)バックストップ: トップ半身所属の「天井吊り片持ちリブ ×2」（enclosure.scad の
+//   tail_backstop 参照）。蓋を伏せて印刷したとき天井面から立ち上がる＝宙に浮く層が出ない。
+//   中央開放が配線/アンテナの通り道とタッチ電極ポケット（pebble: cav_cy±6）の回避を兼ねる。
+backstop_seg_w = 3.5;  // 各リブの幅(Y)。内側端がタッチ電極ポケット縁まで 0.5 残る上限
+backstop_t     = 3.6;  // リブの厚み(X)。天井からの片持ちなので厚めに取って剛性確保
 
 // はめ合い後の値（実測 + 余裕）
 bat_t_fit  = bat_t + 1.0;   // バッテリー厚みは膨張ぶん +1mm（dimensions.md ルール）
@@ -106,7 +111,7 @@ bat_off    = [0, 0];              // バッテリーの XY 微調整（bat_x0/ba
 // ===== Phase 1 追加計測（dimensions.md §7。実測で ASSUMED → MEASURED へ） =====
 // 【画像準拠の修正】カメラは折り返した FPC で「上面(+Z)」に立ち、レンズは +Z（真上）へ。
 //   位置は USB 端寄りで端をオーバーハング。FPC コネクタは逆端(遠端)。センサ = OV3660。
-lens_axis    = [2.2, board_w / 2];                                    // MEASURED→実機補正: X=2.2(初期3.5から頭端(-X)へ1.3mm。1stプロトで窓が尾側にずれていた) / Y=幅中央
+lens_axis    = [4.2, board_w / 2];                                    // MEASURED→実機補正: X=4.2(2.2から尾側(+X)へ2.0mm。実機で窓が頭側にずれていた。履歴: 3.5→2.2→4.2) / Y=幅中央
 cam_org      = [lens_axis[0] - lens_xy[0], lens_axis[1] - lens_xy[1]]; // レンズ = カメラ基板中心
 cam_base_z   = usb_h + 3.4;   // MEASURED: USB 上面(usb_h) から +3.4（USB上面→カメラ下面）
 lens_front_d = 4.5;   // ASSUMED: レンズ前玉 有効径（開口・面取りの基準, < lens_d=6）

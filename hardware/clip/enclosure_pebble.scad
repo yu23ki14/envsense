@@ -94,21 +94,8 @@ module cut_touch_pad() {
                     square(touch_pad_size - 2 * touch_pad_r, center = true);
 }
 
-// 配線通しノッチ: tail_backstop を上端から欠く上開きスリット。
-// 先に配線（両端固定）した電池リードを、組込み時に上から落とし込めるようにする。
-// backstop は基板尾の直後に立つので、その壁を Y 窓で全高カット（上下に開放）。
-module cut_wire_notch() {
-    if (wire_notch) {
-        x0 = board_l + clr;                         // backstop 前面
-        z0 = (z_board_bot - shelf_t) - 1;           // 壁下より少し下（線が電池へ抜ける）
-        z1 = (z_board_top + top_h_rear) + 1;        // 壁上より上（=上開き）
-        translate([x0 - 1, wire_notch_y - wire_notch_w / 2, z0])
-            cube([wall + 2, wire_notch_w, z1 - z0]);
-    }
-}
-
 // シェル本体（分割前）: 外形 − キャビティ − 各開口、リテンションを union。
-//   配線ノッチは tail_backstop（=トップ所属）に欠くので、ここではなく pebble_enclosure_top で。
+//   配線通しは tail_backstop（天井吊りリブ ×2）の中央開放部を使う（専用ノッチは廃止）。
 module pebble_shell_solid() {
     difference() {
         pebble_outer_solid();
@@ -134,11 +121,18 @@ module clip_bosses() {
     z_top    = peb_z_bot + clip_boss_over;            // 裏面壁へ少し食い込む
     z_bot    = clip_pin_z - clip_pin_d / 2 - 1.4;    // ピン下に保持肉を残す
     slit_w   = clip_pin_d * 0.85;                     // スナップ保持スリット幅（ピンより狭い）
+    rb       = clip_boss_r;                           // 意匠の丸め（外形 bbox は従来と同一）
     difference() {
+        // 全エッジ丸めの角丸柱（minkowski 球）。根元(z_top)側だけは角を残さず
+        //   そのまま裏面壁へ食い込ませたいので、内核を z_top - rb まで伸ばす…と
+        //   キャビティ(電池室)を突くため z_top 止まり: 根元の丸みは小フィレット状に見える。
         for (s = [-1, 1]) {
             yb = clip_pin_y + s * (clip_boss_gap / 2 + clip_boss_w / 2);
-            translate([clip_pin_x - clip_boss_l / 2, yb - clip_boss_w / 2, z_bot])
-                cube([clip_boss_l, clip_boss_w, z_top - z_bot]);
+            minkowski() {
+                translate([clip_pin_x - clip_boss_l / 2 + rb, yb - clip_boss_w / 2 + rb, z_bot + rb])
+                    cube([clip_boss_l - 2 * rb, clip_boss_w - 2 * rb, (z_top - rb) - (z_bot + rb)]);
+                sphere(r = rb);
+            }
         }
         // ピン座（Y 軸円筒シート）
         translate([clip_pin_x, clip_pin_y - peb_w, clip_pin_z])
@@ -164,6 +158,10 @@ module clip_arm() {
     knu_od  = clip_pin_d + 2 * 1.4;                          // ナックル外径 = 6.4
     knu_w   = 5;                                              // ナックル幅(Y)
     knu_y0  = peb_cy + 2.5 - knu_w / 2;                      // ナックルは +Y 寄せ（-Y にコイル）
+    boss_clr = 0.5;                                           // ボス内面との片側クリアランス
+    neck_w  = clip_boss_gap - 2 * boss_clr;                  // ネック幅 = ボス内法 - 両側クリア
+    // ボス掃引半径: ピン軸からボス外縁角までの距離 + 余裕。腕の回転中もボスに当てない刳りの半径
+    swing_r = sqrt(pow(clip_boss_l / 2, 2) + pow(clip_boss_over + clip_pin_drop, 2)) + 0.4;
     difference() {
         union() {
             // 有機パッド（裏面を覆う envsense ロゴ面）
@@ -173,12 +171,14 @@ module clip_arm() {
             // ナックル barrel（ピンを抱く。裏面直下まで届く）
             translate([clip_pin_x, knu_y0, clip_pin_z])
                 rotate([-90, 0, 0]) cylinder(d = knu_od, h = knu_w);
-            // ナックル→パッドのネック
+            // ナックル→パッドのネック。★幅はボス内法 - クリアランス（neck_w）に絞る:
+            //   ボス間を通る部分を旧 hull のように 2/3 パッド幅へ広げると内法 12 を超えて
+            //   組めない（蓋が閉まらない以前にナックルがボス間に入らない）
             hull() {
                 translate([clip_pin_x, knu_y0, clip_pin_z])
                     rotate([-90, 0, 0]) cylinder(d = knu_od, h = knu_w);
-                translate([xh, peb_cy - clip_arm_w / 3, az_bot])
-                    cube([0.1, clip_arm_w * 2 / 3, clip_arm_t]);
+                translate([xh, clip_pin_y - neck_w / 2, az_bot])
+                    cube([0.1, neck_w, clip_arm_t]);
             }
             // 先端 掴み返し（パッド面から裏面へ斜めに立ち上がり、先端で裏面に接して掴む）
             hull() {
@@ -195,6 +195,12 @@ module clip_arm() {
         translate([clip_pin_x, peb_cy - peb_w, clip_pin_z])
             rotate([-90, 0, 0])
                 cylinder(d = clip_pin_d + 2 * clr, h = 2 * peb_w);
+        // ボス回転クリアランス: ピン軸まわり半径 swing_r の円筒を、ボス y 帯
+        //   （内面 - boss_clr から外側）で刳る。パッドの肩がどの開き角でも
+        //   ボスに当たらない掃引体クリアランス（回転は Y 軸なので y 幅は不変）。
+        for (s = [-1, 1])
+            translate([clip_pin_x, clip_pin_y + s * (clip_boss_gap / 2 - boss_clr), clip_pin_z])
+                rotate([-s * 90, 0, 0]) cylinder(r = swing_r, h = 30);
         // 腕側 バネ脚スロット（コイル近傍 → +X。可動脚を受けて腕を駆動。実装で角度微調整）
         // TODO[バネ]: 実バネの脚長・曲げが出たら角度/深さを確定。
         translate([clip_pin_x, clip_spring_y - (clip_spring_wire + 2 * clr) / 2, az_top - 1.2])
@@ -247,25 +253,56 @@ module clip_spring_mock() {
 }
 
 // =====================================================================
-// 合わせ目のスナップ嵌合（印籠リップに併設）
+// 合わせ目の印籠 + スナップ嵌合（pebble 専用: 舌=トップ / 溝=ボトム）
 // =====================================================================
-// snap_beads : 舌(mating_lip)の外面に付く半円ビード。bottom に union。
-// snap_pockets: 蓋(top)の溝外壁に掘るキャッチポケット。top から difference。
-// 長辺の両面・左右 2 箇所（計 4 個）。被せると舌が内へ撓み、ビードがポケットへ落ちて係止。
-module snap_beads() {
+// box の mating_lip/mating_groove（舌=ボトム・輪郭基準）は使わない。理由と配置の
+// 設計値（lip_off）は params_pebble.scad の「合わせ目」コメント参照。
+//   - peb_mating_lip   : トップから z=0 を下へ -lip_h 降りる舌。先端リードは下端。
+//   - peb_mating_groove: ボトムのリム面（z=0、印刷時はベッド一層目）に掘る受け溝。
+//   - peb_snap_beads   : 舌（トップ）の外面の半円ビード。
+//   - peb_snap_pockets : ボトムの溝外壁のキャッチポケット。リム面直下 0.6 が係止リッジ。
+// 被せると舌が内へ撓み、ビードがリッジを越えてポケットへ落ちて係止（再開可能）。
+
+// キャビティ輪郭から外側 [o0, o1] の帯（印籠リングの 2D 断面）
+module peb_lip_ring2d(o0, o1) {
+    translate([cav_x0, cav_y0])
+        difference() {
+            offset(r = o1) rrect2d(cav_l, cav_w, corner_r);
+            offset(r = o0) rrect2d(cav_l, cav_w, corner_r);
+        }
+}
+
+module peb_mating_lip() {
+    lead = 0.8;   // 先端リードの高さ（細い首で溝へ誘い込む）
+    led  = 0.4;   // 先端を各面で絞る量
+    translate([0, 0, -(lip_h - lead)])
+        linear_extrude(height = lip_h - lead)
+            peb_lip_ring2d(lip_off, lip_off + lip_t);
+    translate([0, 0, -lip_h])
+        linear_extrude(height = lead)
+            peb_lip_ring2d(lip_off + led, lip_off + lip_t - led);
+}
+
+module peb_mating_groove() {
+    translate([0, 0, -(lip_h + 0.19)])
+        linear_extrude(height = lip_h + 0.2)
+            peb_lip_ring2d(lip_off - lip_clr, lip_off + lip_t + lip_clr);
+}
+
+module peb_snap_beads() {
     for (px = snap_xs)
-        for (face = [cav_y0 - lip_t, cav_y1 + lip_t])
-            translate([px - snap_len / 2, face, snap_z])
+        for (face = [cav_y0 - (lip_off + lip_t), cav_y1 + (lip_off + lip_t)])
+            translate([px - snap_len / 2, face, -snap_z])
                 rotate([0, 90, 0])
                     cylinder(r = snap_proj, h = snap_len, $fn = 24);
 }
 
-module snap_pockets() {
+module peb_snap_pockets() {
     depth = snap_proj + 0.6;                    // ビードが収まる外向き深さ
-    z0    = snap_z - 0.2;                       // ポケット下端（直下が係止リッジ＝抜け止め）
-    z1    = lip_h + 3;                          // 上は開放（挿入路）
+    z0    = -(lip_h + 3);                       // 下は壁内へ逃がす
+    z1    = -(snap_z - 0.2);                    // ポケット上端（リム面との間が係止リッジ）
     for (px = snap_xs)
-        for (s = [[cav_y0 - lip_t, -1], [cav_y1 + lip_t, 1]]) {
+        for (s = [[cav_y0 - (lip_off + lip_t), -1], [cav_y1 + (lip_off + lip_t), 1]]) {
             face = s[0]; dir = s[1];
             ya = face; yb = face + dir * depth;
             translate([px - (snap_len + 1) / 2, min(ya, yb), z0])
@@ -286,11 +323,11 @@ module pebble_enclosure_bottom() {
                 pebble_shell_solid();
                 translate([peb_cx - big / 2, peb_cy - big / 2, -big]) cube([big, big, big]);
             }
-            mating_lip();      // 合わせ目の舌（z=0 → +lip_h、キャビティ矩形基準）
-            snap_beads();      // 舌外面のスナップビード（係止突起）
             clip_bosses();     // 裏面のヒンジボス
         }
-        // 開口はリップ/ボスにも適用（プラグ挿入路を塞がない）
+        peb_mating_groove();   // 舌を受ける溝（★pebble は溝がボトム = リム面がベッド一層目）
+        peb_snap_pockets();    // ビードを受ける係止ポケット
+        // 開口はボスにも適用（プラグ挿入路を塞がない）
         cut_usb_peb();
         cut_lens();
         cut_mic();
@@ -306,11 +343,11 @@ module pebble_enclosure_top() {
                 pebble_shell_solid();
                 translate([peb_cx - big / 2, peb_cy - big / 2, 0]) cube([big, big, big]);
             }
-            tail_backstop();   // 板尾止め（z=0 をまたいで下へ突出。トップ所属）
+            tail_backstop();   // 板尾止めリブ ×2（z=0 をまたいで下へ突出。トップ所属）
+            peb_mating_lip();  // 合わせ目の舌（z=0 → -lip_h。★pebble は舌がトップ所属）
+            peb_snap_beads();  // 舌外面のスナップビード（係止突起）
         }
-        mating_groove();       // 舌を受ける溝
-        snap_pockets();        // ビードを受ける係止ポケット
-        cut_wire_notch();      // backstop に配線通しスリット（中央を Y 窓で開放）
+        cut_usb_peb();         // 舌は頭端の USB 開口を横切るので開口を再適用
     }
 }
 

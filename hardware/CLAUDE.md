@@ -15,7 +15,7 @@ The Phase 1 OpenSCAD design skeleton exists in `clip/`:
 | `parts.scad` | Mock of the internal parts (board / Sense board / camera / battery) used both for assembly fit-check and as the `difference()` negative. |
 | `enclosure.scad` | The shell: rounded outer box minus cavity minus openings (USB-C / lens / mic), split into `enclosure_bottom()` / `enclosure_top()` at z=0. Also holds the board retention (4-corner clamps) and the `lip`/`groove` mating joint. |
 | `params_pebble.scad` | **pebble variant** params: river-stone outer form + a back clip. `include`s `params.scad` and reuses all electronics/cavity values; only adds outer-shape and clip design knobs. The single source of truth for the variant's design values (these are choices, not measured parts, so they are NOT in dimensions.md). |
-| `enclosure_pebble.scad` | **pebble variant** shell + clip. Reuses `cavity()`/`cut_*()`/`corner_grips()`/`mating_lip()`/`mating_groove()` from `enclosure.scad` unchanged; only replaces the outer form (superellipse plate → crown, hull-blended) and adds the pivot-spring clip (`clip_bosses()` on the body, `clip_arm()` as a separate printable part, plus pin/spring mocks). |
+| `enclosure_pebble.scad` | **pebble variant** shell + clip. Reuses `cavity()`/`cut_*()`/`corner_grips()` from `enclosure.scad` unchanged; replaces the outer form (superellipse plate → crown, hull-blended), swaps the mating joint to its own `peb_mating_lip/groove` (tongue on the TOP — see Closure below), and adds the pivot-spring clip (`clip_bosses()` on the body, `clip_arm()` as a separate printable part, plus pin/spring mocks). |
 | `clip.scad` | Top-level. `variant` toggles `box` (default, Phase 1) / `pebble`; `mode` toggles assembly / shell / bottom / top / parts (+ `clip_arm` for pebble) and drives CLI export. |
 
 When you edit OpenSCAD files, match the variable names exactly to the "OpenSCAD variable name"
@@ -37,10 +37,15 @@ by **corner clamps** (`corner_grip`/`corner_grips`) plus a **tail backstop** (`t
 matching common practice for this board (community cases are all screwless snap/sandwich designs).
 Each clamp grips only the **main board** at its corners (measured 1.8 mm component-free margin at
 all 4 corners; tune via `clamp_reach`/`clamp_run`). Because the board sits at the head, only the
-**head corners get both edges** (anchored to the near end wall); the **tail corners get the long-
-edge grip only**, and the `tail_backstop` wall takes the +X load (USB-plug insertion). The
-**Sense board has no margin and is never touched** — tail-side top retainers and the backstop stay
-inside the B2B gap (`top_h_rear < b2b_gap`). The board↔battery gap `bat_gap` must clear both the
+**head corners get both edges and a top retainer** (anchored to the near end wall); the **tail
+corners get the long-edge grip only, below z=0** — tail-side top retainers are geometrically
+impossible: the Sense board canopies the entire main-board tail (full width, overhanging it by
+0.45 mm in +X), so anything on the lid that ends up under that canopy collides with the Sense top
+face during the vertical close (a lid feature's descent sweep is the column above its final
+position). The **Sense board has no margin and is never touched** in the assembled state; +X load
+(USB-plug insertion) is taken by the Sense tail edge against the `tail_backstop` ribs at `clr`
+(through the B2B connector), with the main-board edge as a 0.75 mm backup, and tail lift is
+limited to 0.3 mm by the ribs' brow over the Sense tail (contact only on abnormal lift). The board↔battery gap `bat_gap` must clear both the
 retention shelf **and** the battery-lead solder joints on the underside BAT pads (which face the
 battery), so it is `max(shelf_t + 0.2, bat_lead_clr)` (= 1.6 mm). Pair with low-profile solder + a
 Kapton film on the battery top when wiring.
@@ -51,14 +56,25 @@ the bottom tub, a full-width tail wall in the bottom would block insertion. So `
 **not** call `tail_backstop()`; instead `enclosure_top()` / `pebble_enclosure_top()` union it
 **outside** the `z>0` intersection so its `z<0` portion survives and reaches down to the board tail
 edge. Closing the lid lowers the backstop across `z=0` to lock the board in +X; a `-X` lead-in
-chamfer (`ch`) nudges a +X-drifted board back. It is a centred segment (`backstop_w`, not full
-`cav_w`) so the tail tub stays open for the battery. Assembly order: drop battery+board into the
-open bottom, route leads, then close the top.
+chamfer (`ch`) nudges a +X-drifted board back. **Shape: two cantilever ribs hung from the cavity
+ceiling** (`backstop_seg_w` × `backstop_t`) at the board-tail shoulders — when the lid is printed
+face-down they grow straight up off the ceiling, so no layer starts in mid-air (the earlier low
+cross-wall only existed near `z=0` and its first printed layer was an unsupported bridge between
+the side walls). The rib front face sits at the **Sense tail + `clr` (x=22.0) for the full height**
+— anything further -X would scrape the Sense tail edge during the vertical close, since the Sense
+overhangs the main-board tail. Near the ceiling each rib carries a **brow** (`z_sense_top + 0.3`,
+reaching 1.2 mm over the Sense tail) that limits board-tail lift to 0.3 mm without touching the
+Sense in the normal state; its underside faces down in model space, i.e. up in the face-down
+print, so it adds no overhang. The centre stays fully open — it is the battery-lead / antenna
+pass-through (the former `cut_wire_notch` is gone) and clears the pebble touch-pad pocket
+(`cav_cy ± 6`). The ribs stay `clr` inside the cavity in Y so the `z<0` portion clears the bottom
+wall and tongue. Assembly order: drop battery+board into the open bottom, route leads through the
+centre opening, then close the top.
 
 Open TODOs: the **camera pocket / lens-bore alignment** still needs `cam_rot` (unmeasured in
-dimensions.md §7); and screw bosses are intentionally omitted. The **wire/antenna notch** in
-`tail_backstop` is now implemented (`cut_wire_notch`, applied in `pebble_enclosure_top` since the
-backstop moved to the top). Validate any geometry edit with a headless render
+dimensions.md §7); and screw bosses are intentionally omitted. Wires/antenna route through the
+**open centre between the two backstop ribs** (the dedicated `cut_wire_notch` was removed along
+with the `wire_notch_*` params). Validate any geometry edit with a headless render
 (`Status: NoError` = watertight) — `openscad` is installed via the `openscad@snapshot` cask.
 
 ### pebble variant (product-shaped outer + back clip)
@@ -98,10 +114,15 @@ via `use`. Only the outer shell is replaced and the clip is added.
   for the box's thin-wall cut (which never reaches the outer surface). The pebble cut is a stepped **overmold
   counterbore + a slot tunneling to the receptacle**, so a real plug reaches the connector. If you move the
   layout or `peb_l`/`peb_cx`, re-check the well depth in render.
-- **Closure**: the z=0 tongue/groove (`mating_lip`/`mating_groove`, reused) is the alignment + sandwich
-  retention (board located in the bottom tub, top caps + retains via the corner-clamp pushers). On top of it,
-  pebble adds **snap-fit** detents: `snap_beads()` (on the bottom tongue's outer face) drop into
-  `snap_pockets()` (in the lid's groove wall), 4 total on the long sides. The **thin tongue (1 mm) flexes
+- **Closure**: the z=0 tongue/groove is the alignment + sandwich retention (board located in the bottom tub,
+  top caps + retains via the head corner-clamp pushers). **pebble puts the tongue on the TOP and the groove in
+  the bottom** (`peb_mating_lip`/`peb_mating_groove`, NOT the box `mating_lip`/`mating_groove`): the clip
+  bosses force the bottom to print mating-face-down, and a bottom-side tongue would leave the rim hanging 2 mm
+  above the bed as a rough downward-facing ledge — with the groove in the bottom, the rim *is* the first layer.
+  The ring is pushed `lip_off` (1.0) outside the cavity outline so the bottom groove does not sever the corner
+  clamps' side-wall welds (`lip_off - lip_clr ≥ weld` is the invariant). Snap-fit detents ride along:
+  `peb_snap_beads()` (on the top tongue's outer face) drop into `peb_snap_pockets()` (in the bottom's groove
+  wall, the rim-side 0.6 mm being the catch ridge), 4 total on the long sides. The **thin tongue (1 mm) flexes
   inward** during insertion since the stone outer wall is rigid — keep that in mind if you retune `snap_proj`.
 
 ## Build / export (OpenSCAD)

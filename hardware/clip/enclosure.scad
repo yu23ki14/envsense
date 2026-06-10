@@ -77,7 +77,7 @@ module cut_mic() {
 // 各隅で L 字（2 辺）のグリップを立て、基板の z バンドだけを刳り貫く。
 //   z < z_board_bot   : 棚（基板を下から受ける）
 //   [z_board_bot,0]   : 位置決め壁（基板の角を clr 付きで抱く＝XY 拘束）
-//   z > z_board_top   : 押さえ（基板を上から押さえる／後隅は B2B 隙間内に収める）
+//   z > z_board_top   : 押さえ（基板を上から押さえる。前(USB側)隅のみ — 後隅は top_h=0 で廃止）
 //   押さえ爪は board_top_gap ぶん上へ平行移動（下面=基板上面との隙間, 天も同量上げ爪厚 top_h を維持）。
 // do_edgeB: 短辺(x)方向のアンカーを作るか。頭隅は近い端壁に取れるので true、
 //   尾隅は端壁が遠い（バッテリーが基板より長い）ので false にして tail_backstop で受ける。
@@ -106,36 +106,52 @@ module corner_grip(bx, by, top_h, do_edgeB = true) {
     }
 }
 
-// 尾(+X)バックストップ: 基板尾の直後に立てる横断壁。基板の +X 移動止め
-//   （USB プラグ押し込み力の受け）を兼ねる。Sense に当てないよう B2B 隙間内の高さ。
+// 尾(+X)バックストップ: 基板尾の +X 移動止め（USB プラグ押し込み力の受け）。
 //   ★所属は「トップ半身」: ボトム底タブの尾側を完全に空けて電池(直結・基板より大)の
 //     傾け入れ路を確保し、蓋を閉じると z=0 をまたいで下へ降り基板尾を押さえる。
 //     enclosure_top() / pebble_enclosure_top() で intersection の外に union する
 //     （z<0 部を残すため）。corner_grips() からは呼ばない。
-//   先端(-X下)に面取り = 閉合時に基板が +X へずれていても -X へ誘い戻す。
-//   ★全幅で両側のキャビティ側壁へ weld して接地する（トップ所属。中央に絞ると側壁に
-//     届かず宙に浮く＝印刷不能。配線は中央の cut_wire_notch を通す）。
+//   ★形状は「キャビティ天井から吊る片持ちリブ ×2」（基板尾の両肩）:
+//     蓋を伏せて印刷すると天井面（=ベッド直上）から素直に立ち上がり、宙に浮く層が
+//     出ない（旧: 側壁間の低い横断壁は最下層が全幅ブリッジになり印刷不能だった）。
+//     中央は全開放 = 電池リード/アンテナの通り道（旧 cut_wire_notch は廃止）兼
+//     タッチ電極ポケット（pebble: 天井中央 cav_cy±6）の回避域。
+//   ★前面は Sense 尾 + clr で全高フラット: Sense は主基板尾を 0.45mm オーバーハング
+//     する（assy_offset.x + sense_l = 21.7 > board_l + clr = 21.55）ため、これより
+//     -X の張り出しは蓋の垂直降下で Sense 尾縁を擦る（降下掃引 = 部材底面から上の柱）。
+//     +X 止めは Sense 尾縁が clr=0.3 で先に当たり（B2B コネクタ経由で受ける）、
+//     主基板縁は 0.75 のバックアップ。
+//   ★上部の「ひさし」(brow): Sense 上面 + 0.3 から -X へ張り出し、基板尾の浮き上がり
+//     を 0.3mm に制限する（尾側の上押さえは Sense の蓋で垂直降下が不能なため廃止 →
+//     corner_grips 参照）。通常状態では Sense に触れない。ひさし底面はモデルで下向き
+//     = 伏せ印刷で上向きなのでオーバーハングにならない。
+//   - 先端(-X下)の面取り ch = 閉合時に基板が +X へずれていても -X へ誘い戻す。
+//   - y はキャビティ内側 (cav_y0/cav_y1 ∓ clr) に収める: z<0 部がボトム側壁・舌と
+//     干渉しないため。アンカーは天井への weld のみ（側壁には付けない）。
 module tail_backstop() {
-    x0 = board_l + clr;                  // 基板尾の clr 後ろ
-    z0 = z_board_bot;                    // 基板下面まで（尾エッジを全厚で受ける）
-    z1 = z_board_top + top_h_rear;       // < b2b_gap（Sense 下面に当てない）
-    bw = cav_w + 2 * weld;               // 全幅＋両側壁への食い込み（接地）
-    ch = 1.0;                            // 先端誘い込み面取り
-    translate([x0, cav_y0 - weld, z0])
-        difference() {
-            cube([wall, bw, z1 - z0]);
-            // -X 下エッジを 45° で削ぐ（XZ 三角柱を Y へ押し出し）
-            translate([0, bw, 0])
-                rotate([90, 0, 0])
-                    linear_extrude(height = bw)
-                        polygon([[0, 0], [ch, 0], [0, ch]]);
-        }
+    x_front = assy_offset[0] + sense_l + clr;     // 前面 = Sense 尾 + clr（降下掃引を回避）
+    x_back  = x_front + backstop_t;               // 背面
+    x_brow  = assy_offset[0] + sense_l - 1.2;     // ひさし先端（Sense 尾に 1.2 かぶる）
+    z0      = z_board_bot;                        // 下端 = 基板下面（尾エッジを受ける）
+    z_brow  = z_sense_top + 0.3;                  // ひさし底 = Sense 上面 + 0.3（浮き許容量）
+    z1      = ((z_bat_bot - clr) + cav_h) + weld; // キャビティ天井へ食い込み（溶着）
+    ch      = 1.0;                                // 先端誘い込み面取り
+    for (y0 = [cav_y0 + clr, cav_y1 - clr - backstop_seg_w])
+        translate([0, y0 + backstop_seg_w, 0])
+            rotate([90, 0, 0])
+                linear_extrude(height = backstop_seg_w)
+                    polygon([[x_front + ch, z0], [x_back, z0], [x_back, z1], [x_brow, z1],
+                             [x_brow, z_brow], [x_front, z_brow], [x_front, z0 + ch]]);
 }
 
 module corner_grips() {
     for (c = [[0, 0], [0, board_w], [board_l, 0], [board_l, board_w]]) {
         is_head = c[0] < cav_cx;        // 頭(USB側)隅か
-        corner_grip(c[0], c[1], is_head ? top_h_front : top_h_rear, is_head);
+        // 尾隅の上押さえは廃止（top_h=0）: Sense が主基板尾を全幅で覆うため、蓋の
+        //   垂直降下で押さえが必ず Sense 上面に衝突し閉じられない（さらに印籠溝が
+        //   側壁アンカー(weld)を z<2.2 で切断するため、印刷でも浮島化していた）。
+        //   尾の浮き上がりは tail_backstop のひさし（Sense 尾上 +0.3）で制限する。
+        corner_grip(c[0], c[1], is_head ? top_h_front : 0, is_head);
     }
     // tail_backstop() はトップ半身に所属（enclosure_top で union）。ここでは呼ばない。
 }
@@ -218,7 +234,7 @@ module enclosure_top() {
                 shell_solid();
                 translate([cav_cx - big/2, cav_cy - big/2, 0]) cube([big, big, big]);
             }
-            tail_backstop();   // 板尾止め（z=0 をまたいで下へ突出。トップ所属）
+            tail_backstop();   // 板尾止めリブ ×2（z=0 をまたいで下へ突出。トップ所属）
         }
         mating_groove();       // 舌を受ける溝
     }
