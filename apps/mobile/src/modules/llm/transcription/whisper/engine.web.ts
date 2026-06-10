@@ -6,6 +6,9 @@ export const whisperEngine: WhisperEngine = {
   transcribeFile: async () => {
     throw new ModelUnavailableError('ローカル文字起こしは web では利用できません');
   },
+  generateText: async () => {
+    throw new ModelUnavailableError('ローカル文章生成は web では利用できません');
+  },
   isModelReady: async () => false,
   downloadModel: async () => {
     throw new ModelUnavailableError('ローカルモデルのダウンロードは web では利用できません');

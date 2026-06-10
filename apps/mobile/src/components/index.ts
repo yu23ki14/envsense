@@ -12,6 +12,7 @@ export { ClipHeaderStrip, type ClipHeaderStripProps } from './ClipHeaderStrip';
 export { ClipPhoto, type ClipPhotoProps } from './ClipPhoto';
 export { ClipScreen, type ClipScreenProps } from './ClipScreen';
 export { ClipTabBar } from './ClipTabBar';
+export { DaySummarySection, type DaySummarySectionProps } from './DaySummarySection';
 export { ListRow, type ListRowProps } from './ListRow';
 export { ModalScreen, type ModalScreenProps } from './ModalScreen';
 export { PhotoPlaceholder, type PhotoPlaceholderProps } from './PhotoPlaceholder';

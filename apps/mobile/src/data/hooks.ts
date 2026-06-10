@@ -14,6 +14,7 @@ import {
   type AudioChunk,
   type AudioSession,
   Day,
+  DaySummary,
   DEFAULT_SETTINGS,
   type Highlight,
   PairedDevice,
@@ -64,6 +65,11 @@ export function useDaysList(): Day[] {
 export function useDay(date: string | null): Day | null {
   const [raw] = useMMKVString(date != null ? StorageKeys.day(date) : '__noop__', mmkv);
   return useMemo(() => (date == null ? null : parseRaw(raw, Day)), [date, raw]);
+}
+
+export function useDaySummary(date: string | null): DaySummary | null {
+  const [raw] = useMMKVString(date != null ? StorageKeys.daySummary(date) : '__noop__', mmkv);
+  return useMemo(() => (date == null ? null : parseRaw(raw, DaySummary)), [date, raw]);
 }
 
 function useIds(key: string): string[] {

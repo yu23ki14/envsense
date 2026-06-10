@@ -9,6 +9,7 @@ export const StorageKeys = {
   highlight: (id: string) => `highlight:${id}`,
   timeline: (id: string) => `timeline:${id}`,
   day: (date: string) => `day:${date}`,
+  daySummary: (date: string) => `summary:${date}`,
 
   dateIndex: 'index:dates',
   photosByDay: (date: string) => `index:photos-by-day:${date}`,
@@ -25,4 +26,5 @@ export const StoragePrefixes = {
   highlight: 'highlight:',
   timeline: 'timeline:',
   day: 'day:',
+  daySummary: 'summary:',
 } as const;

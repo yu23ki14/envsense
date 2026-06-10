@@ -18,6 +18,8 @@ export interface WhisperEngine {
     modelId: string,
     opts?: { language?: string },
   ): Promise<WhisperEngineResult>;
+  /** テキストプロンプトから文章を生成する（要約など、Gemma のテキストモダリティ）。 */
+  generateText(prompt: string, modelId: string): Promise<string>;
   /** モデルが端末にDL済みか（registry の cloud フォールバック判定に使う）。 */
   isModelReady(modelId: string): Promise<boolean>;
   /** モデルをDL（進捗 0..1）。完了で ready 扱いになる。 */

@@ -111,18 +111,21 @@ module corner_grip(bx, by, top_h, do_edgeB = true) {
 //     enclosure_top() / pebble_enclosure_top() で intersection の外に union する
 //     （z<0 部を残すため）。corner_grips() からは呼ばない。
 //   先端(-X下)に面取り = 閉合時に基板が +X へずれていても -X へ誘い戻す。
+//   ★全幅で両側のキャビティ側壁へ weld して接地する（トップ所属。中央に絞ると側壁に
+//     届かず宙に浮く＝印刷不能。配線は中央の cut_wire_notch を通す）。
 module tail_backstop() {
     x0 = board_l + clr;                  // 基板尾の clr 後ろ
     z0 = z_board_bot;                    // 基板下面まで（尾エッジを全厚で受ける）
     z1 = z_board_top + top_h_rear;       // < b2b_gap（Sense 下面に当てない）
+    bw = cav_w + 2 * weld;               // 全幅＋両側壁への食い込み（接地）
     ch = 1.0;                            // 先端誘い込み面取り
-    translate([x0, cav_cy - backstop_w / 2, z0])
+    translate([x0, cav_y0 - weld, z0])
         difference() {
-            cube([wall, backstop_w, z1 - z0]);
+            cube([wall, bw, z1 - z0]);
             // -X 下エッジを 45° で削ぐ（XZ 三角柱を Y へ押し出し）
-            translate([0, backstop_w, 0])
+            translate([0, bw, 0])
                 rotate([90, 0, 0])
-                    linear_extrude(height = backstop_w)
+                    linear_extrude(height = bw)
                         polygon([[0, 0], [ch, 0], [0, ch]]);
         }
 }

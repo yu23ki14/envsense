@@ -2,6 +2,7 @@ export * from './audioChunk';
 export * from './audioSession';
 export * from './common';
 export * from './day';
+export * from './daySummary';
 export * from './highlight';
 export * from './pairedDevice';
 export * from './photo';

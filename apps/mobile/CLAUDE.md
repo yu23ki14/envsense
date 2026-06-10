@@ -70,12 +70,19 @@ The UUIDs and packet formats must match the firmware (`firmware/src/config.h`).
 
 ## LLM clients
 
-`src/modules/llm/` is the common inference abstraction: a `task` (currently only `transcription`)
-resolves to a `cloud` or `local` provider behind a shared interface. `catalog.ts` is the single
-source of truth for the selectable models (used by both the settings UI and the resolver);
-`registry.ts` exposes `transcribe()`, which reads `Settings.audio.transcriptionModel` and falls
-back to the cloud default when the chosen provider is unavailable. The cloud Groq Whisper provider
-lives in `transcription/groq.ts`.
+`src/modules/llm/` is the common inference abstraction: a `task` (`transcription` / `text` /
+`vision`) resolves to a `cloud` or `local` provider behind a shared interface. `catalog.ts` is the
+single source of truth for the selectable models (used by both the settings UI and the resolver);
+`registry.ts` exposes `transcribe()` (reads `Settings.audio.transcriptionModel`), `generateText()`
+(reads `Settings.summary.model`), and `getVisionProvider()`, each falling back to the cloud
+default when the chosen provider is unavailable (and only if the corresponding `cloudFallback`
+setting allows it — `cloudFallback: false` means "never send this data off-device"). The cloud
+Groq providers live in `transcription/groq.ts` and `text/groq.ts` / `vision/groq.ts` (both Llama 4
+Scout via the shared `groqChat.ts`). The Groq API key is resolved by `groqKey.ts`: the key saved
+on the Device screen (SecureStore) wins over the `EXPO_PUBLIC_GROQ_API_KEY` env var. Local
+inference (transcription **and** text generation) shares one LiteRT engine/model instance and is
+serialized through `localQueue.ts`. **Vision is cloud-only**: the `react-native-litert-lm` patch
+drops `visionBackend`, so local Gemma cannot take image input.
 
 On-device STT (`transcription/whisperLocal.ts`) runs via **LiteRT-LM** (`react-native-litert-lm`,
 Google AI Edge runtime) with **Gemma 4 E2B** (a multimodal model — audio → text). On Android it uses
@@ -118,10 +125,22 @@ Caveats: Gemma "reasons over" audio rather than being a pure ASR, so transcripti
 (`transcriptionPrompt()` in `engine.native.ts`) and verbatim accuracy/latency for Japanese must be
 verified on-device — adjust the prompt or model (E4B) if needed. Gemma 4 E2B needs ~4 GB+ RAM.
 
-The legacy clients `groq-llama3` / `openai` / `ollama` (image / text) still live directly under
-`src/modules/` and are slated to migrate into `modules/llm/` as `vision` / `text` tasks. API keys
-are read from `EXPO_PUBLIC_*` environment variables via `src/keys.ts` (`.env` is gitignored; note
-that the `EXPO_PUBLIC_` prefix means the value is embedded into the client bundle).
+The legacy clients `openai` / `ollama` still live directly under `src/modules/` and are slated to
+migrate into `modules/llm/` (`groq-llama3` was already replaced by the `text` / `vision` tasks).
+API keys are read from `EXPO_PUBLIC_*` environment variables via `src/keys.ts` (`.env` is
+gitignored; note that the `EXPO_PUBLIC_` prefix means the value is embedded into the client
+bundle).
+
+## AI summaries (`src/modules/summary/`)
+
+`generateDaySummary(date, onProgress)` builds the per-day AI summary (issues #13 / #18 / #32) as a
+map-reduce: representative photos (non-blurry, evenly spaced, max 8) get cloud-vision descriptions
+cached onto `Photo.description`; each `AudioSession`'s transcript (excerpted to a char budget —
+small for local Gemma's 4096-token window) is summarized into a `SessionSummary`; then one final
+`text` call writes the first-person diary (`DaySummary`, stored at `summary:{date}`,
+read reactively via `useDaySummary`). The UI lives in `components/DaySummarySection.tsx`
+(Journal modal); model + cloud-fallback settings are on the Device screen
+(`Settings.summary`).
 
 ## Design system (`src/ui/`)
 
