@@ -12,6 +12,7 @@ import { StyleSheet } from 'react-native-unistyles';
 import {
   Card,
   ClipScreen,
+  ConfirmModal,
   ListRow,
   SectionHeader,
   SettingSelectModal,
@@ -19,6 +20,7 @@ import {
 } from '../components';
 import { secrets, updateSettings, usePairedDevice, useSettings } from '../data';
 import { useDeviceContext } from '../modules/DeviceProvider';
+import { rebootDevice, sleepDevice } from '../modules/devicePower';
 import {
   localModelIdOf,
   SUMMARY_MODELS,
@@ -80,6 +82,8 @@ export function DeviceScreen() {
   const [transcriptionModalOpen, setTranscriptionModalOpen] = useState(false);
   const [summaryModalOpen, setSummaryModalOpen] = useState(false);
   const [languageModalOpen, setLanguageModalOpen] = useState(false);
+  const [powerAction, setPowerAction] = useState<'sleep' | 'reboot' | null>(null);
+  const [powerBusy, setPowerBusy] = useState(false);
   const selectedModelId = localModelIdOf(settings.audio.transcriptionModel);
   const selectedSummaryModelId = localModelIdOf(settings.summary.model);
 
@@ -100,6 +104,22 @@ export function DeviceScreen() {
 
   const batteryLabel = paired?.lastBatteryPercent != null ? `${paired.lastBatteryPercent}%` : '—';
   const rssiLabel = paired?.lastRssi != null ? `${paired.lastRssi} dBm` : '—';
+
+  const runPowerAction = async () => {
+    if (liveDevice == null || powerAction == null) return;
+    setPowerBusy(true);
+    try {
+      if (powerAction === 'sleep') await sleepDevice(liveDevice);
+      else await rebootDevice(liveDevice);
+    } catch (e) {
+      // コマンド書き込み直後にデバイス側から切断されるため、ここでの失敗は
+      // むしろ「スリープ / 再起動した」合図。エラー表示はしない。
+      console.log('Power command write ended with', e);
+    } finally {
+      setPowerBusy(false);
+      setPowerAction(null);
+    }
+  };
 
   return (
     <ClipScreen>
@@ -133,13 +153,26 @@ export function DeviceScreen() {
             </View>
             <View style={styles.statusAction}>
               {isLive ? (
-                <Button
-                  variant="outline"
-                  onPress={disconnect}
-                  iconLeft={<Icon name="bluetooth" size={16} color="primary" />}
-                >
-                  切断する
-                </Button>
+                <View style={styles.statusButtons}>
+                  <View style={styles.statusButton}>
+                    <Button
+                      variant="outline"
+                      onPress={disconnect}
+                      iconLeft={<Icon name="bluetooth" size={16} color="primary" />}
+                    >
+                      切断する
+                    </Button>
+                  </View>
+                  <View style={styles.statusButton}>
+                    <Button
+                      variant="outline"
+                      onPress={() => setPowerAction('sleep')}
+                      iconLeft={<Icon name="pause" size={16} color="primary" />}
+                    >
+                      スリープ
+                    </Button>
+                  </View>
+                </View>
               ) : (
                 <Button
                   variant="outline"
@@ -294,6 +327,13 @@ export function DeviceScreen() {
             <RowDivider />
             <ListRow icon="refresh" title="アップデートを確認" onPress={() => undefined} />
             <RowDivider />
+            <ListRow
+              icon="bolt"
+              title="再起動"
+              description={isLive ? 'デバイスを再起動する' : '接続中のみ操作できます'}
+              onPress={() => (isLive ? setPowerAction('reboot') : undefined)}
+            />
+            <RowDivider />
             <ListRow icon="help" title="ヘルプ" onPress={() => undefined} />
           </Card>
         </View>
@@ -338,6 +378,22 @@ export function DeviceScreen() {
           updateSettings((s) => ({ ...s, audio: { ...s.audio, transcriptionLanguage: language } }))
         }
         onClose={() => setLanguageModalOpen(false)}
+      />
+
+      <ConfirmModal
+        visible={powerAction != null}
+        title={
+          powerAction === 'reboot' ? 'デバイスを再起動しますか？' : 'デバイスをスリープしますか？'
+        }
+        message={
+          powerAction === 'reboot'
+            ? '再起動中は一時的に切断されます。起動後は自動で再接続を試みます。'
+            : 'スリープ中は撮影と録音が止まり、接続も切断されます。起こすには本体の銅箔に触れるか、ボタンを押してください。'
+        }
+        confirmLabel={powerAction === 'reboot' ? '再起動' : 'スリープ'}
+        busy={powerBusy}
+        onConfirm={runPowerAction}
+        onClose={() => setPowerAction(null)}
       />
     </ClipScreen>
   );
@@ -523,6 +579,13 @@ const styles = StyleSheet.create((theme) => ({
   },
   statusAction: {
     marginTop: theme.spacing.md,
+  },
+  statusButtons: {
+    flexDirection: 'row',
+    gap: theme.spacing.sm,
+  },
+  statusButton: {
+    flex: 1,
   },
   apiKeysList: {
     gap: theme.spacing.sm,

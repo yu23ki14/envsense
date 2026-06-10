@@ -12,7 +12,7 @@
 // DEVICE CONFIGURATION
 // =============================================================================
 #define BLE_DEVICE_NAME "envsense"
-#define FIRMWARE_VERSION_STRING "2.3.2"
+#define FIRMWARE_VERSION_STRING "2.4.0"
 #define HARDWARE_REVISION "ESP32-S3-v1.0"
 #define MANUFACTURER_NAME "envsense"
 
@@ -156,6 +156,11 @@ typedef enum {
 #define AUDIO_CODEC_UUID "EA800002-9C72-497F-81F9-752FFE11F565"
 #define PHOTO_DATA_UUID "EA800005-9C72-497F-81F9-752FFE11F565"
 #define PHOTO_CONTROL_UUID "EA800006-9C72-497F-81F9-752FFE11F565"
+#define POWER_CONTROL_UUID "EA800007-9C72-497F-81F9-752FFE11F565"
+
+// Power commands (written to POWER_CONTROL_UUID)
+#define POWER_CMD_SLEEP 0x01  // Enter deep sleep (same as touch / button long press)
+#define POWER_CMD_REBOOT 0x02 // Restart the device
 
 // Battery Service UUID - Cast to uint16_t for BLE compatibility
 #define BATTERY_SERVICE_UUID (uint16_t) 0x180F
@@ -236,6 +241,18 @@ typedef enum {
 // Deep Sleep Configuration
 #define DEEP_SLEEP_BUTTON_WAKEUP 1    // Enable button wake-up from deep sleep
 #define POWER_OFF_SLEEP_DELAY_MS 1000 // Delay before entering deep sleep after power off
+
+// =============================================================================
+// TOUCH SENSOR CONFIGURATION - copper foil pad on GPIO3 (D2 / TOUCH3)
+// Hold the foil for TOUCH_HOLD_OFF_MS to power off; touching it again wakes
+// the device from deep sleep (the power button keeps working for both too).
+// =============================================================================
+#define TOUCH_SENSE_PIN 3           // GPIO3 (D2) - copper foil capacitive pad
+#define TOUCH_HOLD_OFF_MS 2000      // Hold duration to power off (same as button long press)
+#define TOUCH_DELTA_RATIO 0.12f     // Touched when raw > baseline * (1 + ratio); S3 raw rises on touch
+#define TOUCH_BASELINE_SAMPLES 16   // Boot-time calibration sample count (foil must be untouched)
+#define TOUCH_SAMPLE_INTERVAL_MS 50 // Polling interval in the main loop
+#define TOUCH_DEBUG_LOG 0           // 1: log raw values every second + LED mirrors touch state (calibration)
 
 // Power Button States
 typedef enum { BUTTON_IDLE, BUTTON_PRESSED, BUTTON_LONG_PRESS, BUTTON_RELEASED } button_state_t;

@@ -7,6 +7,7 @@
 #include <BLEUtils.h>
 
 #include "config.h" // Use config.h for all configurations
+#include "driver/rtc_io.h"
 #include "esp_camera.h"
 #include "esp_sleep.h"
 #include "mic.h"
@@ -26,6 +27,16 @@ device_state_t deviceState = DEVICE_BOOTING;
 volatile bool buttonPressed = false;
 unsigned long buttonPressTime = 0;
 led_status_t ledMode = LED_BOOT_SEQUENCE;
+
+// Copper-foil touch sensor state (GPIO3 / TOUCH3)
+RTC_DATA_ATTR uint32_t touchBaseline = 0; // Survives deep sleep; calibrated on cold boot
+bool touchWaitRelease = false;            // After a touch wake-up, ignore the foil until released
+volatile bool touchDebugLed = false;      // TOUCH_DEBUG_LOG: mirror the touch state on the LED
+
+// BLE power commands, deferred to the main loop so the write response is sent
+// before the BLE stack is torn down (see PowerControlCallback)
+volatile bool powerOffRequested = false;
+volatile bool rebootRequested = false;
 
 // Gentle power optimization
 unsigned long lastActivity = 0;
@@ -50,6 +61,7 @@ bool lightSleepEnabled = true;
 static BLEUUID serviceUUID(ENVSENSE_SERVICE_UUID);
 static BLEUUID photoDataUUID(PHOTO_DATA_UUID);
 static BLEUUID photoControlUUID(PHOTO_CONTROL_UUID);
+static BLEUUID powerControlUUID(POWER_CONTROL_UUID);
 static BLEUUID audioDataUUID(AUDIO_DATA_UUID);
 static BLEUUID audioCodecUUID(AUDIO_CODEC_UUID);
 
@@ -61,6 +73,7 @@ static BLEUUID otaDataUUID(OTA_DATA_UUID);
 // Characteristics
 BLECharacteristic *photoDataCharacteristic;
 BLECharacteristic *photoControlCharacteristic;
+BLECharacteristic *powerControlCharacteristic;
 BLECharacteristic *batteryLevelCharacteristic;
 BLECharacteristic *audioDataCharacteristic;
 BLECharacteristic *audioCodecCharacteristic;
@@ -108,6 +121,8 @@ void readBatteryLevel();
 void updateBatteryService();
 void IRAM_ATTR buttonISR();
 void handleButton();
+void setupTouch();
+void handleTouch();
 void updateLED();
 void blinkLED(int count, int delayMs);
 void enterPowerSave();
@@ -127,6 +142,10 @@ void IRAM_ATTR buttonISR()
 {
     buttonPressed = true;
 }
+
+// Touch interrupt only exists to wake the chip out of light sleep so the main
+// loop can resume polling the foil; the handler itself has nothing to do.
+void IRAM_ATTR touchWakeISR() {}
 
 // -------------------------------------------------------------------------
 // LED Functions
@@ -247,6 +266,87 @@ void handleButton()
 }
 
 // -------------------------------------------------------------------------
+// Touch Handling (copper foil on GPIO3 / TOUCH3)
+// -------------------------------------------------------------------------
+static inline uint32_t touchThreshold()
+{
+    return (uint32_t) (touchBaseline * (1.0f + TOUCH_DELTA_RATIO));
+}
+
+void setupTouch()
+{
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TOUCHPAD && touchBaseline > 0) {
+        // Woken by the foil: keep the baseline stored in RTC memory and ignore
+        // the touch still in progress so we don't immediately power off again.
+        touchWaitRelease = true;
+    } else {
+        // Cold boot or button wake: calibrate assuming the foil is untouched.
+        for (int i = 0; i < 4; i++) {
+            touchRead(TOUCH_SENSE_PIN); // Discard warm-up readings
+        }
+        uint64_t sum = 0;
+        for (int i = 0; i < TOUCH_BASELINE_SAMPLES; i++) {
+            sum += touchRead(TOUCH_SENSE_PIN);
+            delay(10);
+        }
+        touchBaseline = (uint32_t) (sum / TOUCH_BASELINE_SAMPLES);
+    }
+    Serial.printf("Touch baseline: %lu, threshold: %lu\n", (unsigned long) touchBaseline,
+                  (unsigned long) touchThreshold());
+
+    // Arm touch wake-up for light sleep: while BLE-connected the main loop can
+    // sit in esp_light_sleep_start() for up to 15s and would never poll the
+    // foil. A touch wakes the loop, which then times the 2s hold as usual.
+    touchAttachInterrupt(TOUCH_SENSE_PIN, touchWakeISR, (uint32_t) (touchBaseline * TOUCH_DELTA_RATIO));
+    esp_sleep_enable_touchpad_wakeup();
+}
+
+void handleTouch()
+{
+    unsigned long now = millis();
+    static unsigned long lastSampleTime = 0;
+    static unsigned long touchStartTime = 0;
+    static bool touchDown = false;
+
+    if (touchBaseline == 0 || now - lastSampleTime < TOUCH_SAMPLE_INTERVAL_MS) {
+        return;
+    }
+    lastSampleTime = now;
+
+    uint32_t raw = touchRead(TOUCH_SENSE_PIN);
+    bool touched = raw > touchThreshold();
+
+#if TOUCH_DEBUG_LOG
+    touchDebugLed = touched;
+    static unsigned long lastLogTime = 0;
+    if (now - lastLogTime >= 1000) {
+        Serial.printf("Touch raw: %lu (threshold: %lu)\n", (unsigned long) raw, (unsigned long) touchThreshold());
+        lastLogTime = now;
+    }
+#endif
+
+    if (touchWaitRelease) {
+        if (!touched) {
+            touchWaitRelease = false;
+        }
+        return;
+    }
+
+    if (touched && !touchDown) {
+        touchDown = true;
+        touchStartTime = now;
+    } else if (touched && touchDown) {
+        // A short touch does nothing; only a continuous hold powers off
+        if (now - touchStartTime >= TOUCH_HOLD_OFF_MS && ledMode != LED_POWER_OFF_SEQUENCE) {
+            Serial.println("Touch hold detected - powering off");
+            ledMode = LED_POWER_OFF_SEQUENCE;
+        }
+    } else if (!touched) {
+        touchDown = false;
+    }
+}
+
+// -------------------------------------------------------------------------
 // Power Management
 // -------------------------------------------------------------------------
 void enterPowerSave()
@@ -317,8 +417,22 @@ void shutdownDevice()
     // Turn off LED (inverted logic)
     digitalWrite(STATUS_LED_PIN, HIGH);
 
-    // Enter deep sleep
-    esp_sleep_enable_ext0_wakeup(GPIO_NUM_1, 0); // Wake on button press
+    // Clear every wake source configured during normal operation - the light
+    // sleep timer in particular persists and would re-boot the device a few
+    // seconds after power off.
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+
+    // Enter deep sleep. Touch wake-up cannot coexist with ext0 on the ESP32-S3,
+    // so the power button wakes via ext1 instead (same behavior: wake on LOW).
+    // Keep the RTC peripherals powered so the internal pull-up on the button
+    // pin stays active during deep sleep (otherwise the pin floats and drifts
+    // low, waking the device on its own).
+    rtc_gpio_pullup_en((gpio_num_t) POWER_BUTTON_PIN);
+    rtc_gpio_pulldown_dis((gpio_num_t) POWER_BUTTON_PIN);
+    esp_sleep_enable_ext1_wakeup(1ULL << POWER_BUTTON_PIN, ESP_EXT1_WAKEUP_ALL_LOW);
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+    // Wake when the foil's raw value rises this much above the sleep benchmark
+    touchSleepWakeUpEnable(TOUCH_SENSE_PIN, (uint32_t) (touchBaseline * TOUCH_DELTA_RATIO));
     Serial.println("Entering deep sleep...");
     delay(100);
     esp_deep_sleep_start();
@@ -538,6 +652,22 @@ class PhotoControlCallback : public BLECharacteristicCallbacks
     }
 };
 
+class PowerControlCallback : public BLECharacteristicCallbacks
+{
+    void onWrite(BLECharacteristic *characteristic) override
+    {
+        if (characteristic->getLength() == 1) {
+            uint8_t command = characteristic->getData()[0];
+            Serial.printf("PowerControl received: 0x%02X\n", command);
+            if (command == POWER_CMD_SLEEP) {
+                powerOffRequested = true;
+            } else if (command == POWER_CMD_REBOOT) {
+                rebootRequested = true;
+            }
+        }
+    }
+};
+
 class OTAControlCallback : public BLECharacteristicCallbacks
 {
     void onWrite(BLECharacteristic *pChar) override
@@ -674,6 +804,10 @@ void configure_ble()
     photoControlCharacteristic->setCallbacks(new PhotoControlCallback());
     uint8_t controlValue = 0;
     photoControlCharacteristic->setValue(&controlValue, 1);
+
+    // Power Control characteristic (sleep / reboot commands from the app)
+    powerControlCharacteristic = service->createCharacteristic(powerControlUUID, BLECharacteristic::PROPERTY_WRITE);
+    powerControlCharacteristic->setCallbacks(new PowerControlCallback());
 
     // Battery Service
     BLEService *batteryService = server->createService(BATTERY_SERVICE_UUID);
@@ -867,6 +1001,9 @@ void setup_app()
     // Setup button interrupt
     attachInterrupt(digitalPinToInterrupt(POWER_BUTTON_PIN), buttonISR, CHANGE);
 
+    // Calibrate the copper-foil touch sensor
+    setupTouch();
+
     // Start LED boot sequence
     ledMode = LED_BOOT_SEQUENCE;
 
@@ -930,8 +1067,41 @@ void loop_app()
     // Handle button presses
     handleButton();
 
+    // Handle copper-foil touch (hold to power off)
+    handleTouch();
+
+    // Handle BLE power commands (deferred from PowerControlCallback)
+    if (rebootRequested) {
+        Serial.println("Rebooting by BLE command...");
+        delay(200); // Let the BLE write response flush
+        ESP.restart();
+    }
+    if (powerOffRequested) {
+        powerOffRequested = false;
+        if (ledMode != LED_POWER_OFF_SEQUENCE) {
+            Serial.println("Sleep requested by BLE command");
+            ledMode = LED_POWER_OFF_SEQUENCE;
+        }
+    }
+
     // Update LED
     updateLED();
+
+    // One-shot wakeup cause log, delayed so the USB CDC host can re-attach first
+    static bool wakeCauseLogged = false;
+    if (!wakeCauseLogged && now > 8000) {
+        Serial.printf("Wakeup cause: %d (0=power-on 3=button 4=timer 5=touch)\n",
+                      (int) esp_sleep_get_wakeup_cause());
+        wakeCauseLogged = true;
+    }
+
+#if TOUCH_DEBUG_LOG
+    // Debug: LED mirrors the touch state so the threshold can be tuned without
+    // a serial connection (LED is inverted: LOW = ON)
+    if (touchDebugLed && ledMode == LED_NORMAL_OPERATION) {
+        digitalWrite(STATUS_LED_PIN, LOW);
+    }
+#endif
 
     // Process OTA updates
     ota_loop();
