@@ -81,6 +81,42 @@ module cut_usb_peb() {
     // オーバーモールド・ザグリ（外側・断面 full radius）。スロットを内包する大きさ。
     translate([x_out, peb_cy, zc])
         rbar_x(well_d, usb_well_w, usb_well_h, min(usb_well_w, usb_well_h) / 2);
+    // 下開放ポータル: スロットの下半分を角形にし、合わせ面(z=0)の下まで開ける。
+    //   旧形状はスロット下端(z=usb_z=0.2)と合わせ面の間に高さ 0.2mm の糸状壁が残り
+    //   印刷不能だった。受け口下端は usb_z にあるのでシェル側の下縁は不要。
+    translate([x_out, peb_cy - usb_plug_w / 2, -0.1])
+        cube([x_slot - x_out, usb_plug_w, zc + 0.1]);
+    // 舌の薄片除去: ザグリ(井戸 x ≤ -3.1)が舌の帯(x = -3.9..-2.9)を貫通して厚さ 0.2mm
+    //   の薄板を残し印刷不能だったため、開口幅では舌の帯を合わせ面の下まで全て払う
+    //   （舌のリングはこの幅だけ途切れる。box の「開口はリップにも適用」と同じ扱い）。
+    //   x はボトムの溝の外/内の壁面に揃えて止め、薄片もリム残し欠けも出さない。
+    translate([cav_x0 - (lip_off + lip_t + lip_clr) - 0.1, peb_cy - usb_plug_w / 2, -(lip_h + 0.3)])
+        cube([lip_t + 2 * lip_clr + 0.1, usb_plug_w, (lip_h + 0.3) + 0.1]);
+}
+
+// microSD 逃し（pebble）: 外面に開口は開けない（#30: SD は露出しない）。トップの頭壁
+// 内面に「合わせ面(z=0)まで下開放の縦チャネル」を掘る。
+//   - 下開放が組立の要: 蓋の垂直降下でカード先端が下からチャネルへ入る
+//     （チャネル＝カード先端の降下コラムそのもの）。X 盲の単純ポケットだと、ポケット
+//     下の壁がカードの降下コラムに衝突して蓋が閉じられない。
+//   - X には盲: 前面 = USB ザグリ底(-3.1)と同一面。カード先端(-2.5)に 0.6mm の余裕。
+//     ザグリ底と面を揃えるのは、井戸との間に 0.1mm の薄肉が残るのを防ぐため
+//     （チャネル上部は井戸と連結し、井戸を覗くとカード先端が見えるが外面開口は増えない。
+//     プラグ樹脂はザグリ底 x=-3.1 で止まりカード先端 -2.5 には届かない）。
+//   - カード交換は開蓋で行う（電池直結・開けて組む設計と同じ思想）。
+//   - 舌(z<0)へは -0.1 だけ届くが、この y 帯はほぼ cut_usb_peb が舌を払う帯
+//     （peb_cy±usb_plug_w/2）に含まれ、はみ出す両端 ~0.75mm に深さ 0.1mm の
+//     ノッチが付くだけ（印刷・嵌合に影響なし）。
+//   - z/y は ASSUMED（params.scad の sd_z0/sd_y0）。実機で要確認。
+//   - トップ半身専用: pebble_shell_solid には入れない（ボトムが共有するとリム一層目を
+//     0.1mm 削るため）。pebble_enclosure_top の difference でのみ適用。
+module cut_sd_peb() {
+    open_w  = sd_card_w + 2 * sd_clr_y;
+    x_front = -usb_overhang - usb_well_clr;   // = USB ザグリ底と同一面（-3.1）
+    x_in    = cav_x0 + 1;                     // 頭壁内面を貫いてキャビティへ
+    z1      = sd_z0 + sd_card_t + sd_clr_z;
+    translate([x_front, board_w / 2 - open_w / 2, -0.1])
+        cube([x_in - x_front, open_w, z1 + 0.1]);
 }
 
 // 静電タッチ電極（銅箔）座: 天面内側(キャビティ天井 z=cav_top_z)に浅い角丸ポケット。
@@ -348,6 +384,7 @@ module pebble_enclosure_top() {
             peb_snap_beads();  // 舌外面のスナップビード（係止突起）
         }
         cut_usb_peb();         // 舌は頭端の USB 開口を横切るので開口を再適用
+        cut_sd_peb();          // microSD 縦チャネル（トップ半身専用 — module コメント参照）
     }
 }
 

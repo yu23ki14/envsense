@@ -51,6 +51,15 @@ module camera() {
             cylinder(d = lens_d, h = lens_h);
 }
 
+// ----- microSD カード（Sense 部品面(+Z)上のスロットに挿入。頭(-X)へ突き出す） -----
+// 先端 x = -sd_protrude（実測 2.5）。z/y は ASSUMED（params.scad / dimensions.md §2）。
+// 筐体側の逃しは enclosure.scad cut_sd（box）/ enclosure_pebble.scad cut_sd_peb（pebble）。
+module sd_card() {
+    color("Orange")
+        translate([-sd_protrude, sd_y0, sd_z0])
+            cube([sd_card_l, sd_card_w, sd_card_t]);
+}
+
 // ----- バッテリー（基板の下(-Z)に積層。頭合わせで尾(+X)へはみ出す） -----
 module battery() {
     bx = bat_x0 + bat_off[0];
@@ -66,6 +75,7 @@ module device_assembly() {
     usb_connector();
     sense_board();
     camera();
+    sd_card();
     battery();
 }
 

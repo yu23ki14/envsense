@@ -13,7 +13,7 @@ The Phase 1 OpenSCAD design skeleton exists in `clip/`:
 | `dimensions.md` | **Measured part dimensions** — the single source of truth for the reference values. |
 | `params.scad` | All measured values (variable names mirror dimensions.md) + clearance/wall/process knobs + derived Z layers and cavity dims. |
 | `parts.scad` | Mock of the internal parts (board / Sense board / camera / battery) used both for assembly fit-check and as the `difference()` negative. |
-| `enclosure.scad` | The shell: rounded outer box minus cavity minus openings (USB-C / lens / mic), split into `enclosure_bottom()` / `enclosure_top()` at z=0. Also holds the board retention (4-corner clamps) and the `lip`/`groove` mating joint. |
+| `enclosure.scad` | The shell: rounded outer box minus cavity minus openings (USB-C / SD / lens / mic), split into `enclosure_bottom()` / `enclosure_top()` at z=0. Also holds the board retention (4-corner clamps) and the `lip`/`groove` mating joint. |
 | `params_pebble.scad` | **pebble variant** params: river-stone outer form + a back clip. `include`s `params.scad` and reuses all electronics/cavity values; only adds outer-shape and clip design knobs. The single source of truth for the variant's design values (these are choices, not measured parts, so they are NOT in dimensions.md). |
 | `enclosure_pebble.scad` | **pebble variant** shell + clip. Reuses `cavity()`/`cut_*()`/`corner_grips()` from `enclosure.scad` unchanged; replaces the outer form (superellipse plate → crown, hull-blended), swaps the mating joint to its own `peb_mating_lip/groove` (tongue on the TOP — see Closure below), and adds the pivot-spring clip (`clip_bosses()` on the body, `clip_arm()` as a separate printable part, plus pin/spring mocks). |
 | `clip.scad` | Top-level. `variant` toggles `box` (default, Phase 1) / `pebble`; `mode` toggles assembly / shell / bottom / top / parts (+ `clip_arm` for pebble) and drives CLI export. |
@@ -76,6 +76,28 @@ dimensions.md §7); and screw bosses are intentionally omitted. Wires/antenna ro
 **open centre between the two backstop ribs** (the dedicated `cut_wire_notch` was removed along
 with the `wire_notch_*` params). Validate any geometry edit with a headless render
 (`Status: NoError` = watertight) — `openscad` is installed via the `openscad@snapshot` cask.
+
+### microSD relief (the inserted card overhangs the head)
+
+The Sense board's microSD slot (a cage on the Sense **component (+Z) face**, between the USB top
+z=3.0 and the camera base z=6.4) lets the inserted card protrude to **x = -2.5** (`sd_protrude`,
+measured) — 0.6 mm past the cavity head wall's inner face. The card's z/y envelope is **ASSUMED**
+(`sd_z0`/`sd_y0` in params.scad, mocked by `sd_card()` in parts.scad) — verify on hardware.
+
+- **box** (`cut_sd`): a **through slot above the USB opening**, the standard solution in community
+  XIAO Sense cases. Assembly is *close empty, then insert the card from outside* — so the lid's
+  vertical descent never meets the card. The slot merges with the USB opening into one hole (a
+  bridge between them would be a 0.2 mm unprintable wafer). The card nose ends ~1 mm inside the
+  outer face; removal is tweezers or opening the case.
+- **pebble** (`cut_sd_peb`): **no external opening** (#30 keeps SD unexposed). Instead a **vertical
+  channel in the TOP's head wall, open down to the mating face (z=0)** and blind in X. The
+  open-bottom is what makes closing possible: the channel *is* the card nose's descent column, so
+  the lid drops around the inserted card (an X-blind pocket alone would collide during the close).
+  Its front face is coplanar with the USB counterbore floor (x=-3.1) to avoid a 0.1 mm wafer
+  against the well — the channel joins the well's upper region (card nose visible down the well,
+  but a plug's overmold stops at the well floor and never reaches it). Card swap = open the case.
+  The cut is applied **only in `pebble_enclosure_top()`**, not in `pebble_shell_solid()` — the
+  bottom shares the shell solid and would otherwise get a 0.1 mm bite out of its rim first layer.
 
 ### pebble variant (product-shaped outer + back clip)
 

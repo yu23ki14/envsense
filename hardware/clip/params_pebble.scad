@@ -31,7 +31,8 @@ cav_top_z  = (z_bat_bot - clr) + cav_h;   // キャビティ天面（内側）
 cav_bot_z  = (z_bat_bot - clr);           // キャビティ裏面（内側）
 peb_z_top  = cav_top_z + wall_touch;      // 外殻 天面頂（カメラ側ドーム）
 peb_z_bot  = cav_bot_z - wall;            // 外殻 裏面（フラット＝クリップ座）
-peb_h      = peb_z_top - peb_z_bot;       // 参考: 全高（画像 20–23 に整合するか echo で確認）
+peb_h      = peb_z_top - peb_z_bot;       // 参考: 全高 ≈23.85。画像目標 20–23 は top_headroom 追加
+                                          //   （実機の天井干渉対策）を優先して超過を許容（2026-06 決定）
 
 // 外形中心 = キャビティ中心（電子部品を内包したまま、余白を有機形状に使う）
 peb_cx = cav_cx;
@@ -54,7 +55,8 @@ peb_seg = $preview ? 48 : 96;
 touch_pad       = true;                   // 電極座を作るか
 touch_pad_size  = 12;                     // 銅箔パッド 一辺(mm)。箔はこれより少し小さく切る
 touch_pad_r     = 2;                      // 角丸半径
-touch_pad_depth = 0.3;                    // 座の彫り込み深さ（箔厚ぶん。壁 1.6→約1.3mm に薄化）
+touch_pad_depth = 0.8;                    // 座の彫り込み深さ。壁 1.6→0.8mm（0.4ノズル2層 = FDM実用下限）に薄化。
+                                          //   旧 0.3（残り1.3mm）はタッチ無反応の実機報告を受け感度優先で深化（C∝1/d で約1.6倍）
 touch_pad_pos   = [cav_cx + 8, peb_cy];   // 位置: 尾側のクリア域（レンズ/マイク/カメラ回避）
 
 // 配線通し: tail_backstop（天井吊りリブ ×2）の中央開放部（y ≈ 2.3〜15.3）を使う。

@@ -48,11 +48,33 @@ module outer_solid() {
 module cut_usb() {
     open_w = 12.5;                 // プラグが挿せる幅（dimensions.md #30 の方針）
     open_h = usb_open_h + 1.0;     // 余裕
-    z0 = z_board_top + usb_z;      // 開口下端
+    z_top = z_board_top + usb_z + open_h;   // 開口上端（受け口基準は据え置き）
+    z0 = -0.1;                     // 下開放: 合わせ面(z=0)の下から開ける。
+                                   //   旧: z_board_top + usb_z(=0.2) 始まりだと、top では合わせ面との
+                                   //   間に高さ 0.2mm の糸状壁、bottom ではリップに 0.2mm の切れ端が
+                                   //   残りどちらも印刷不能。受け口下端は usb_z にあるので縁は不要。
     x_out = cav_x0 - wall - 1;     // 端壁の外側
     x_in  = cav_x0 + 4;            // 端壁を貫いてキャビティ内へ（プラグ進入路）
     translate([x_out, board_w / 2 - open_w / 2, z0])
-        cube([x_in - x_out, open_w, open_h]);
+        cube([x_in - x_out, open_w, z_top - z0]);
+}
+
+// microSD 逃し（box）: カード先端(x=-sd_protrude=-2.5)が頭壁内面(cav_x0=-1.9)を 0.6mm
+// 貫くため、USB 開口の真上に貫通スロットを開ける（XIAO Sense コミュニティ製ケースの定石）。
+//   - 組立は「空で閉じる → 外からカードを挿す」: 蓋の垂直降下時にカードが無いので
+//     降下掃引の衝突が起きない。壁 1.6mm では盲ポケットにできない（残り 0.5mm）。
+//   - カード先端は外面(-3.5)から 1.0mm 奥のほぼツライチ。抜くのはピンセット or 開蓋。
+//   - USB 開口上端(z=3.7)とスロット下端(z=3.2)は重なる → 独立穴にせず USB 開口と連結した
+//     一つの開口にする（間に橋を残すと 0.2mm の糸状壁になり印刷不能）。
+//   - z/y は ASSUMED（params.scad の sd_z0/sd_y0）。実機で要確認。
+module cut_sd() {
+    open_w = sd_card_w + 2 * sd_clr_y;
+    z0 = sd_z0 - sd_clr_z;
+    z1 = sd_z0 + sd_card_t + sd_clr_z;
+    x_out = cav_x0 - wall - 1;     // 端壁の外側
+    x_in  = cav_x0 + 1;            // 端壁を貫いてキャビティ内へ
+    translate([x_out, board_w / 2 - open_w / 2, z0])
+        cube([x_in - x_out, open_w, z1 - z0]);
 }
 
 // レンズ穴: 上面（+Z）を貫く。開口貫通＝レンズ突出方式。
@@ -87,7 +109,10 @@ module corner_grip(bx, by, top_h, do_edgeB = true) {
     xo = (sx == 1) ? cav_x0 : cav_x1;   // 壁側 x
     yo = (sy == 1) ? cav_y0 : cav_y1;   // 壁側 y
     z0 = z_board_bot - shelf_t;                       // 棚の底
-    z1 = z_board_top + board_top_gap + top_h;         // 押さえの天（下面を board_top_gap 上げた分、天も上げて爪厚 top_h を維持）
+    // 押さえの天（下面を board_top_gap 上げた分、天も上げて爪厚 top_h を維持）。
+    // 爪なし(top_h=0)の後隅は z=0（分割面）で止める: board_top_gap を足すと 0.5mm だけ
+    // top 側にはみ出し、印籠溝に溶着を切られた浮島が top の合わせ面に印刷されてしまう。
+    z1 = (top_h > 0) ? z_board_top + board_top_gap + top_h : z_board_top;
     difference() {
         union() {
             // 辺 A: by 側の長辺に沿う（x 方向に clamp_run 走る / y は壁→基板内 clamp_reach）
@@ -194,6 +219,7 @@ module shell_solid() {
         outer_solid();
         cavity();
         cut_usb();
+        cut_sd();
         cut_lens();
         cut_mic();
     }

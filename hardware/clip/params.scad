@@ -34,6 +34,8 @@ sense_t     = 1.1;      // PCB 厚み
 b2b_gap     = 2.7;      // B2B コネクタ高さ（基板間の隙間）
 mic_xy      = [6.6, 2]; // PDM マイク穴 位置（拡張ボード ローカル）
 cam_fpc_xy  = [8.8, 9]; // カメラ FPC コネクタ 位置（拡張ボード ローカル）
+sd_protrude = 2.5;      // SD カード挿入時の頭(-X)突き出し: 先端 x = -2.5（基板頭 x=0 基準, 実測）
+                        //   旧記載「埋め込み式 0」は誤り。USB 前面(x=-1.6)よりさらに 0.9mm 出る
 
 // ===== 3. 合体状態（実測値） =====
 assy_h      = 7.8;          // 合体時 総厚（カメラ除く）
@@ -139,6 +141,18 @@ z_usb_top   = z_board_top + usb_h;
 z_cam_top   = cam_base_z + cam_t;   // カメラ基板 上面
 z_lens_top  = z_cam_top + lens_h;   // レンズ先端（+Z 最高点）= 天面壁を貫通して突出
 
+// ===== microSD カード（Sense 部品面(+Z)上のスロット。頭(-X)へ突き出す） =====
+// スロットケージは Sense 拡張ボードの部品面(+Z)上（実機写真・Seeed wiki 写真で確認）。
+// カードは USB 上面(z=3.0)とカメラ底(z=6.4)の間を通り、先端が x=-sd_protrude まで届いて
+// 頭壁内面(cav_x0=-1.9)を 0.6mm 貫く → 頭壁に逃しが必要（enclosure の cut_sd / cut_sd_peb）。
+sd_card_l = 15;    // カード規格 長さ
+sd_card_w = 11;    // カード規格 幅
+sd_card_t = 1.0;   // カード規格 厚み（リブ部最大）
+sd_z0     = z_sense_top + 0.2;              // ASSUMED: カード下面 = Sense 上面 + ケージ床 0.2
+sd_y0     = board_w / 2 - sd_card_w / 2;    // ASSUMED: 幅中央（実機写真でほぼ中央）
+sd_clr_y  = 1.0;   // 逃し開口の y 余裕（片側）。z/y が ASSUMED のため広めに取る
+sd_clr_z  = 0.8;   // 逃し開口の z 余裕（片側）
+
 // ===== 派生：内部キャビティ寸法（基板＋バッテリーの footprint 包絡） =====
 // 頭合わせレイアウト: 頭(-X)は USB 突出 or バッテリー頭の手前、尾(+X)は
 //   基板尾 or バッテリー尾の奥。中心は両者の包絡中心（基板中心ではない）。
@@ -149,7 +163,9 @@ foot_y1 = max(board_w, bat_y0 + bat_w);
 cav_l = (foot_x1 - foot_x0) + 2 * clr;
 cav_w = (foot_y1 - foot_y0) + 2 * clr;
 // 内部はカメラ本体まで内包。レンズは天面壁を貫通させて外へ出す。
-cav_h = (max(z_cam_top, z_usb_top) - z_bat_bot) + 2 * clr;
+top_headroom = 1.0;   // 天井の追加余白(z)。実機で基板(カメラ最上部)が top と干渉して閉まらなかった補正。
+                      //   レンズ突出量はこの分だけ減る（z_lens_top - (天井+wall) = 0.45mm 残り）
+cav_h = (max(z_cam_top, z_usb_top) - z_bat_bot) + 2 * clr + top_headroom;
 
 // キャビティ中心（footprint 包絡の中心）
 cav_cx = (foot_x0 + foot_x1) / 2;
