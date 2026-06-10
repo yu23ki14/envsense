@@ -78,6 +78,7 @@ module cut_mic() {
 //   z < z_board_bot   : 棚（基板を下から受ける）
 //   [z_board_bot,0]   : 位置決め壁（基板の角を clr 付きで抱く＝XY 拘束）
 //   z > z_board_top   : 押さえ（基板を上から押さえる／後隅は B2B 隙間内に収める）
+//   押さえ爪は board_top_gap ぶん上へ平行移動（下面=基板上面との隙間, 天も同量上げ爪厚 top_h を維持）。
 // do_edgeB: 短辺(x)方向のアンカーを作るか。頭隅は近い端壁に取れるので true、
 //   尾隅は端壁が遠い（バッテリーが基板より長い）ので false にして tail_backstop で受ける。
 module corner_grip(bx, by, top_h, do_edgeB = true) {
@@ -85,8 +86,8 @@ module corner_grip(bx, by, top_h, do_edgeB = true) {
     sy = (by < cav_cy) ? 1 : -1;        // 内向き y
     xo = (sx == 1) ? cav_x0 : cav_x1;   // 壁側 x
     yo = (sy == 1) ? cav_y0 : cav_y1;   // 壁側 y
-    z0 = z_board_bot - shelf_t;          // 棚の底
-    z1 = z_board_top + top_h;            // 押さえの天
+    z0 = z_board_bot - shelf_t;                       // 棚の底
+    z1 = z_board_top + board_top_gap + top_h;         // 押さえの天（下面を board_top_gap 上げた分、天も上げて爪厚 top_h を維持）
     difference() {
         union() {
             // 辺 A: by 側の長辺に沿う（x 方向に clamp_run 走る / y は壁→基板内 clamp_reach）
@@ -97,9 +98,10 @@ module corner_grip(bx, by, top_h, do_edgeB = true) {
                 box2([xo - sx * weld,                by + sy * corner_r],
                      [bx + sx * clamp_reach,         by + sy * (corner_r + clamp_run)], z0, z1);
         }
-        // 基板挿入スロット（基板 + clr を z バンドだけ刳る）
+        // 基板挿入スロット（基板 + clr を z バンドだけ刳る）。
+        // スロット上端を board_top_gap 持ち上げ＝押さえ爪の下面を上げて基板上面に隙間を作る。
         translate([0, 0, z_board_bot])
-            linear_extrude(height = z_board_top - z_board_bot)
+            linear_extrude(height = (z_board_top + board_top_gap) - z_board_bot)
                 offset(r = clr) rrect2d(board_l, board_w, corner_r);
     }
 }
