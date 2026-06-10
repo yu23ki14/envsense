@@ -142,13 +142,20 @@ export function TodayScreen() {
           )}
         </View>
 
-        <View style={styles.gutter}>
+        <View style={[styles.gutter, styles.linkActions]}>
           <Button
             variant="outline"
             iconLeft={<Icon name="ear" size={16} color="primary" />}
             onPress={() => router.push({ pathname: '/transcript', params: { date: todayKey } })}
           >
             録音と文字起こしを見る
+          </Button>
+          <Button
+            variant="outline"
+            iconLeft={<Icon name="journal" size={16} color="primary" />}
+            onPress={() => router.push({ pathname: '/journal', params: { date: todayKey } })}
+          >
+            今日のまとめ（AI サマリ）
           </Button>
         </View>
 
@@ -256,6 +263,9 @@ const styles = StyleSheet.create((theme) => ({
     gap: 2,
   },
   list: {
+    gap: theme.spacing.sm,
+  },
+  linkActions: {
     gap: theme.spacing.sm,
   },
   highlightHead: {

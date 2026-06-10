@@ -22,6 +22,7 @@ export {
   listPhotoIdsForDay,
   listTimelineIdsForDay,
 } from './dayIndex';
+export * from './daySummaryRepo';
 export * from './highlightRepo';
 export * from './pairedDeviceRepo';
 export * from './photoRepo';

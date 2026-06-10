@@ -10,7 +10,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useMemo } from 'react';
 import { View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
-import { Card, ClipPhoto, ModalScreen, SectionHeader, Tag } from '../components';
+import { Card, ClipPhoto, DaySummarySection, ModalScreen, SectionHeader, Tag } from '../components';
 import { dateKey, useDay, useHighlightsForDay, usePhotosForDay, useTimelineForDay } from '../data';
 import { Button, Icon, Text } from '../ui';
 
@@ -92,6 +92,11 @@ export function JournalScreen() {
           >
             録音と文字起こしを見る
           </Button>
+        </View>
+
+        <SectionHeader kicker="AI サマリ" title="一日のまとめ" />
+        <View style={styles.gutter}>
+          <DaySummarySection date={resolvedDate} />
         </View>
 
         <SectionHeader kicker="写真" title="その日の眺め" />

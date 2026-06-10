@@ -21,6 +21,8 @@ import { secrets, updateSettings, usePairedDevice, useSettings } from '../data';
 import { useDeviceContext } from '../modules/DeviceProvider';
 import {
   localModelIdOf,
+  SUMMARY_MODELS,
+  summaryLabel,
   TRANSCRIPTION_MODELS,
   transcriptionLabel,
   useWhisperModel,
@@ -33,6 +35,13 @@ const KIND_GROUP: Record<'cloud' | 'local', string> = {
 };
 
 const TRANSCRIPTION_OPTIONS: SettingSelectOption<string>[] = TRANSCRIPTION_MODELS.map((m) => ({
+  value: m.ref,
+  label: m.label,
+  note: m.note,
+  group: KIND_GROUP[m.kind],
+}));
+
+const SUMMARY_OPTIONS: SettingSelectOption<string>[] = SUMMARY_MODELS.map((m) => ({
   value: m.ref,
   label: m.label,
   note: m.note,
@@ -69,8 +78,10 @@ export function DeviceScreen() {
   const paired = usePairedDevice();
   const { device: liveDevice, status, connect, disconnect } = useDeviceContext();
   const [transcriptionModalOpen, setTranscriptionModalOpen] = useState(false);
+  const [summaryModalOpen, setSummaryModalOpen] = useState(false);
   const [languageModalOpen, setLanguageModalOpen] = useState(false);
   const selectedModelId = localModelIdOf(settings.audio.transcriptionModel);
+  const selectedSummaryModelId = localModelIdOf(settings.summary.model);
 
   const isLive = liveDevice != null;
   const headerSubtitle =
@@ -215,6 +226,38 @@ export function DeviceScreen() {
           </Card>
         </View>
 
+        <SectionHeader kicker="AI" title="サマリ生成" />
+        <View style={styles.gutter}>
+          <Card padding="none">
+            <ListRow
+              icon="spark"
+              title="生成モデル"
+              description="セッション要約と日記の生成に使用"
+              value={summaryLabel(settings.summary.model)}
+              onPress={() => setSummaryModalOpen(true)}
+            />
+            {selectedSummaryModelId != null ? (
+              <>
+                <RowDivider />
+                <LocalModelRow modelId={selectedSummaryModelId} />
+                <RowDivider />
+                <ListRow
+                  icon="cloud"
+                  title="クラウド補完"
+                  description="ローカル失敗時に Groq で生成・写真の説明にも使用"
+                  value={settings.summary.cloudFallback ? 'オン' : 'オフ'}
+                  onPress={() =>
+                    updateSettings((s) => ({
+                      ...s,
+                      summary: { ...s.summary, cloudFallback: !s.summary.cloudFallback },
+                    }))
+                  }
+                />
+              </>
+            ) : null}
+          </Card>
+        </View>
+
         <SectionHeader kicker="同期" title="クラウド" />
         <View style={styles.gutter}>
           <Card padding="none">
@@ -275,6 +318,15 @@ export function DeviceScreen() {
           updateSettings((s) => ({ ...s, audio: { ...s.audio, transcriptionModel: ref } }))
         }
         onClose={() => setTranscriptionModalOpen(false)}
+      />
+
+      <SettingSelectModal
+        visible={summaryModalOpen}
+        title="サマリ生成モデル"
+        options={SUMMARY_OPTIONS}
+        value={settings.summary.model}
+        onSelect={(ref) => updateSettings((s) => ({ ...s, summary: { ...s.summary, model: ref } }))}
+        onClose={() => setSummaryModalOpen(false)}
       />
 
       <SettingSelectModal
@@ -384,7 +436,7 @@ function ApiKeysCard() {
         <TextField
           label="Groq API キー"
           placeholder="gsk_..."
-          helpText="ハイライト生成と Vision に使用"
+          helpText="文字起こし・サマリ生成・写真の説明に使用"
           value={groq}
           onChangeText={setGroq}
           secureTextEntry

@@ -181,28 +181,60 @@ async function transcribeFile(
   };
 
   try {
-    try {
-      return { text: await runOnce() };
-    } catch (err) {
-      // GPU(OpenCL 未対応 / PowerVR ドライバ等)では loadModel の OpenCL プローブや推論で失敗する。
-      // forceCpu でない＝まだ GPU を試している段階なので、初回失敗時は CPU に切り替えて 1 度だけ
-      // 再試行する（loadModel 段階の失敗でも loadedBackend に依存せず確実に CPU へ落とす）。
-      if (!forceCpu) {
-        console.warn(`[litert] GPU path failed, falling back to CPU: ${String(err)}`);
-        forceCpu = true;
-        loadedModel = null;
-        loadedBackend = null;
-        // ハング時は GPU engine が裏で生きたまま。同じインスタンスで loadModel(cpu) すると
-        // cleanupInternal が稼働中の engine を close して native がクラッシュしうるので、
-        // インスタンスごと破棄して CPU 用に作り直す（ハングした GPU engine は孤立させる）。
-        if (err instanceof InferenceTimeoutError) llm = null;
-        return { text: await runOnce() };
-      }
-      throw err;
-    }
+    return { text: await withCpuFallback(runOnce) };
   } finally {
     deleteFile(wavRel);
   }
+}
+
+/**
+ * GPU(OpenCL 未対応 / PowerVR ドライバ等)では loadModel の OpenCL プローブや推論で失敗する。
+ * forceCpu でない＝まだ GPU を試している段階なので、初回失敗時は CPU に切り替えて 1 度だけ
+ * 再試行する（loadModel 段階の失敗でも loadedBackend に依存せず確実に CPU へ落とす）。
+ */
+async function withCpuFallback(run: () => Promise<string>): Promise<string> {
+  try {
+    return await run();
+  } catch (err) {
+    if (!forceCpu) {
+      console.warn(`[litert] GPU path failed, falling back to CPU: ${String(err)}`);
+      forceCpu = true;
+      loadedModel = null;
+      loadedBackend = null;
+      // ハング時は GPU engine が裏で生きたまま。同じインスタンスで loadModel(cpu) すると
+      // cleanupInternal が稼働中の engine を close して native がクラッシュしうるので、
+      // インスタンスごと破棄して CPU 用に作り直す（ハングした GPU engine は孤立させる）。
+      if (err instanceof InferenceTimeoutError) llm = null;
+      return run();
+    }
+    throw err;
+  }
+}
+
+/**
+ * テキストプロンプトから文章を生成する（サマリ生成用、Gemma のテキストモダリティ）。
+ * 文字起こしと同じロード済みモデル / greedy デコード設定を共有する。要約も事実の
+ * 列挙に近い決定論的タスクなので greedy で十分で、設定を分けるとタスク切替のたびに
+ * 数 GB のモデルを再ロードすることになる。
+ */
+async function generateText(prompt: string, modelId: string): Promise<string> {
+  const runOnce = async (): Promise<string> => {
+    const m = await ensureLoaded(modelId);
+    m.resetConversation(); // 呼び出しごとに独立（履歴を持ち越さない）
+    console.info(`[litert] generate start (backend=${loadedBackend})`);
+    const started = Date.now();
+    const infer = m.sendMessage(prompt);
+    // GPU はハングしうるので時間で打ち切る。CPU は信頼できるので待ち切る。
+    const text =
+      loadedBackend === 'gpu'
+        ? await withTimeout(infer, GPU_INFERENCE_TIMEOUT_MS, 'gpu generate')
+        : await infer;
+    console.info(
+      `[litert] generate done (${loadedBackend}, ${Date.now() - started}ms): ${(text ?? '').length} chars`,
+    );
+    return text;
+  };
+  return withCpuFallback(runOnce);
 }
 
 async function isModelReady(modelId: string): Promise<boolean> {
@@ -221,4 +253,9 @@ async function downloadModel(
   mmkv.set(pathKey(modelId), path);
 }
 
-export const whisperEngine: WhisperEngine = { transcribeFile, isModelReady, downloadModel };
+export const whisperEngine: WhisperEngine = {
+  transcribeFile,
+  generateText,
+  isModelReady,
+  downloadModel,
+};

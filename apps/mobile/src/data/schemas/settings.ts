@@ -21,6 +21,16 @@ export const AudioSettings = z.object({
 });
 export type AudioSettings = z.infer<typeof AudioSettings>;
 
+/** AI サマリ（セッション要約・日記）生成の設定。 */
+export const SummarySettings = z.object({
+  /** 文章生成モデル（modules/llm の SUMMARY_MODELS の ref）。 */
+  model: ModelRef,
+  // ローカル生成が未準備/失敗したときにクラウド(Groq)で補完するか。false なら
+  // 文字起こしテキストも写真も端末外に出さない（＝写真の説明生成もスキップされる）。
+  cloudFallback: z.boolean().default(true),
+});
+export type SummarySettings = z.infer<typeof SummarySettings>;
+
 export const SyncSettings = z.object({
   autoSyncMode: z.enum(['wifi', 'always', 'manual']),
   preferredSsid: z.string().nullable(),
@@ -48,6 +58,11 @@ export const Settings = z.object({
   schemaVersion: z.number().int().nonnegative(),
   capture: CaptureSettings,
   audio: AudioSettings,
+  // `.default` で旧データ（このキーが無い保存済み設定）もマイグレーションなしで読める。
+  summary: SummarySettings.default({
+    model: 'groq:llama-4-scout',
+    cloudFallback: true,
+  }),
   sync: SyncSettings,
   export: ExportDefaults,
 });
@@ -66,6 +81,12 @@ export const DEFAULT_SETTINGS: Settings = {
     // 足場段階では初期状態から動く Groq を既定にする。
     transcriptionModel: 'groq:whisper-large-v3-turbo',
     transcriptionLanguage: 'ja',
+    cloudFallback: true,
+  },
+  summary: {
+    // クラウド既定（初期状態から動く）。文字列は modules/llm の GROQ_TEXT_REF と
+    // 一致させる（data → modules の import は循環になるためリテラルで持つ）。
+    model: 'groq:llama-4-scout',
     cloudFallback: true,
   },
   sync: {

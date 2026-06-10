@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import { absoluteUri, readBytes } from '../../../data';
-import { keys } from '../../../keys';
+import { getGroqApiKey, hasGroqApiKey } from '../groqKey';
 import type { TranscriptionProvider } from '../types';
 import { speechText, type WhisperSegment } from './speech';
 
@@ -45,7 +45,7 @@ async function transcribeWithGroq(relativePath: string, language?: string): Prom
   const response = await fetch(GROQ_TRANSCRIPTION_URL, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${keys.groq}`,
+      Authorization: `Bearer ${await getGroqApiKey()}`,
     },
     body: form,
   });
@@ -61,6 +61,6 @@ async function transcribeWithGroq(relativePath: string, language?: string): Prom
 export const groqWhisperProvider: TranscriptionProvider = {
   model: GROQ_WHISPER_REF,
   kind: 'cloud',
-  isAvailable: async () => keys.groq.length > 0,
+  isAvailable: () => hasGroqApiKey(),
   transcribe: (relativePath, opts) => transcribeWithGroq(relativePath, opts?.language),
 };
