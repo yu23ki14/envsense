@@ -29,6 +29,7 @@ import {
   transcriptionLabel,
   useWhisperModel,
 } from '../modules/llm';
+import { CAPTURE_INTERVAL_SEC } from '../modules/useDeviceCapture';
 import { Button, Icon, type IconName, Text, TextField } from '../ui';
 
 const KIND_GROUP: Record<'cloud' | 'local', string> = {
@@ -75,10 +76,16 @@ function autoSyncLabel(mode: 'wifi' | 'always' | 'manual'): string {
   }
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
 export function DeviceScreen() {
   const settings = useSettings();
   const paired = usePairedDevice();
-  const { device: liveDevice, status, connect, disconnect } = useDeviceContext();
+  const { device: liveDevice, status, sync, connect, disconnect } = useDeviceContext();
   const [transcriptionModalOpen, setTranscriptionModalOpen] = useState(false);
   const [summaryModalOpen, setSummaryModalOpen] = useState(false);
   const [languageModalOpen, setLanguageModalOpen] = useState(false);
@@ -97,13 +104,21 @@ export function DeviceScreen() {
   else if (status.isConnecting) statusTitle = '接続要求中';
 
   const statusDesc = isLive
-    ? `${settings.capture.intervalSec} 秒ごとに撮影しています`
+    ? `${CAPTURE_INTERVAL_SEC} 秒ごとに撮影しています`
     : paired != null
       ? 'デバイスが範囲外か電源オフです'
       : 'デバイスをペアリングしてください';
 
   const batteryLabel = paired?.lastBatteryPercent != null ? `${paired.lastBatteryPercent}%` : '—';
   const rssiLabel = paired?.lastRssi != null ? `${paired.lastRssi} dBm` : '—';
+
+  const unsyncedFiles =
+    sync.status != null ? sync.status.audioFiles + sync.status.photoFiles : null;
+  const unsyncedLabel = unsyncedFiles != null ? `${unsyncedFiles} 件` : '—';
+  const syncProgressRatio =
+    sync.progress != null && sync.progress.totalBytes > 0
+      ? Math.min(1, sync.progress.doneBytes / sync.progress.totalBytes)
+      : 0;
 
   const runPowerAction = async () => {
     if (liveDevice == null || powerAction == null) return;
@@ -122,7 +137,13 @@ export function DeviceScreen() {
   };
 
   return (
-    <ClipScreen>
+    <ClipScreen
+      status={{
+        connection: isLive ? 'connected' : 'disconnected',
+        batteryPercent: paired?.lastBatteryPercent ?? null,
+        unsyncedCount: unsyncedFiles,
+      }}
+    >
       <View style={styles.flow}>
         <View style={styles.header}>
           <Text variant="caption" color="textMuted">
@@ -149,8 +170,43 @@ export function DeviceScreen() {
             <View style={styles.statusMetrics}>
               <StatusMetric icon="battery" label="バッテリー" value={batteryLabel} />
               <StatusMetric icon="bluetooth" label="信号" value={rssiLabel} />
-              <StatusMetric icon="cloud" label="未同期" value="—" />
+              <StatusMetric icon="cloud" label="未同期" value={unsyncedLabel} />
             </View>
+            {isLive && unsyncedFiles != null && (unsyncedFiles > 0 || sync.syncing) ? (
+              <View style={styles.syncSection}>
+                {sync.syncing ? (
+                  <>
+                    <Text variant="caption" color="textMuted">
+                      {sync.progress != null && sync.progress.phase === 'transfer'
+                        ? `同期中 ${sync.progress.doneFiles}/${sync.progress.totalFiles} 件 · ${formatBytes(sync.progress.doneBytes)} / ${formatBytes(sync.progress.totalBytes)}`
+                        : sync.progress?.phase === 'finishing'
+                          ? '文字起こしを仕上げています…'
+                          : 'ファイル一覧を取得中…'}
+                    </Text>
+                    <View style={styles.progressTrack}>
+                      <View
+                        style={[
+                          styles.progressFill,
+                          { width: `${Math.round(syncProgressRatio * 100)}%` },
+                        ]}
+                      />
+                    </View>
+                  </>
+                ) : (
+                  <Button
+                    onPress={sync.startSync}
+                    iconLeft={<Icon name="cloud" size={16} color="onPrimary" />}
+                  >
+                    {`同期する（${unsyncedFiles} 件 · ${formatBytes(sync.status?.totalBytes ?? 0)}）`}
+                  </Button>
+                )}
+                {sync.error != null && !sync.syncing ? (
+                  <Text variant="caption" color="error">
+                    同期に失敗しました: {sync.error}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             <View style={styles.statusAction}>
               {isLive ? (
                 <View style={styles.statusButtons}>
@@ -193,7 +249,8 @@ export function DeviceScreen() {
             <ListRow
               icon="image"
               title="撮影間隔"
-              value={`${settings.capture.intervalSec} 秒`}
+              description="ファームウェア側で固定"
+              value={`${CAPTURE_INTERVAL_SEC} 秒`}
               onPress={() => undefined}
             />
             <RowDivider />
@@ -606,6 +663,10 @@ const styles = StyleSheet.create((theme) => ({
   },
   statusAction: {
     marginTop: theme.spacing.md,
+  },
+  syncSection: {
+    marginTop: theme.spacing.md,
+    gap: theme.spacing.xs,
   },
   statusButtons: {
     flexDirection: 'row',
