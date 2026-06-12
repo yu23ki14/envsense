@@ -136,11 +136,14 @@ module corner_grip(bx, by, top_h, do_edgeB = true) {
 //     傾け入れ路を確保し、蓋を閉じると z=0 をまたいで下へ降り基板尾を押さえる。
 //     enclosure_top() / pebble_enclosure_top() で intersection の外に union する
 //     （z<0 部を残すため）。corner_grips() からは呼ばない。
-//   ★形状は「キャビティ天井から吊る片持ちリブ ×2」（基板尾の両肩）:
+//   ★形状は「キャビティ天井から吊る片持ちリブ ×1」（+Y 壁寄せ・幅 backstop_w）:
 //     蓋を伏せて印刷すると天井面（=ベッド直上）から素直に立ち上がり、宙に浮く層が
 //     出ない（旧: 側壁間の低い横断壁は最下層が全幅ブリッジになり印刷不能だった）。
-//     中央は全開放 = 電池リード/アンテナの通り道（旧 cut_wire_notch は廃止）兼
-//     タッチ電極ポケット（pebble: 天井中央 cav_cy±6）の回避域。
+//     単リブ化（旧 ±Y 両肩の 2 リブ → 2026-06）: −Y 側を全開放して電池リード/
+//     アンテナの通り道をまとめ（旧 cut_wire_notch は廃止）、タッチ電極ポケット
+//     （pebble: −Y 寄せ y ≤ 11.0）の回避域とする。受け面は幅 7.3 で旧 2 リブ合計
+//     （2.3+2.3）以上を単独で確保。+X 反力が +Y 寄りに偏るが、ヨーは尾隅の
+//     長辺グリップ（z<0）が受ける。
 //   ★前面は Sense 尾 + clr で全高フラット: Sense は主基板尾を 0.45mm オーバーハング
 //     する（assy_offset.x + sense_l = 21.7 > board_l + clr = 21.55）ため、これより
 //     -X の張り出しは蓋の垂直降下で Sense 尾縁を擦る（降下掃引 = 部材底面から上の柱）。
@@ -161,12 +164,11 @@ module tail_backstop() {
     z_brow  = z_sense_top + 0.3;                  // ひさし底 = Sense 上面 + 0.3（浮き許容量）
     z1      = ((z_bat_bot - clr) + cav_h) + weld; // キャビティ天井へ食い込み（溶着）
     ch      = 1.0;                                // 先端誘い込み面取り
-    for (y0 = [cav_y0 + clr, cav_y1 - clr - backstop_seg_w])
-        translate([0, y0 + backstop_seg_w, 0])
-            rotate([90, 0, 0])
-                linear_extrude(height = backstop_seg_w)
-                    polygon([[x_front + ch, z0], [x_back, z0], [x_back, z1], [x_brow, z1],
-                             [x_brow, z_brow], [x_front, z_brow], [x_front, z0 + ch]]);
+    translate([0, cav_y1 - clr, 0])
+        rotate([90, 0, 0])
+            linear_extrude(height = backstop_w)
+                polygon([[x_front + ch, z0], [x_back, z0], [x_back, z1], [x_brow, z1],
+                         [x_brow, z_brow], [x_front, z_brow], [x_front, z0 + ch]]);
 }
 
 module corner_grips() {

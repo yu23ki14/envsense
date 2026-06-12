@@ -4,7 +4,7 @@
 //   - 外形      : 川石モチーフ（スーパー楕円プレート → クラウンへ hull で滑らかに丸める。裏面はフラット）
 //   - 内部      : enclosure.scad のキャビティ/開口/基板リテンションをそのまま流用
 //   - 合わせ目  : enclosure.scad の印籠リップ/溝を流用（キャビティ矩形基準なので石外形でも内側に収まる）
-//   - クリップ  : ピボット＋トーションバネ式。本体側ヒンジボス + 可動クリップ腕（別パーツ書き出し）
+//   - クリップ  : 一体成形フレックス式（clip_flex を bottom へ union。可動部品・調達部品なし）
 //
 // enclosure.scad から流用する module:
 //   cavity() / cut_usb() / cut_lens() / cut_mic() / corner_grips() / mating_lip() / mating_groove()
@@ -145,159 +145,73 @@ module pebble_shell_solid() {
 }
 
 // =====================================================================
-// クリップ: 本体側ヒンジボス
+// クリップ: 一体成形フレックスクリップ（bottom へ union。可動部品なし）
 // =====================================================================
-// 裏面(-Z)の頭寄りに 2 ボス。中央(clip_boss_gap)に腕のナックルとバネが入る。
-// ★これがクリップを筐体へ固定する要：ピン座を「スナップ挿入」式にしてピンを捕捉する。
-//   ピン座は Y 軸の円筒。-Z（裏面外側）から座へ伸びるスリットはピン径よりわずかに狭く、
-//   ピンを押し込むと脚がしなって座に嵌り、軸方向にも径方向にも保持される（=本体に固定）。
-//   腕のナックルにピンを通してから、ピンごと両ボス座へスナップして組む。
-//   バネの固定脚を受ける座は、バネ選定後に追加（dimensions.md / 別途）。
-module clip_bosses() {
-    z_top    = peb_z_bot + clip_boss_over;            // 裏面壁へ少し食い込む
-    z_bot    = clip_pin_z - clip_pin_d / 2 - 1.4;    // ピン下に保持肉を残す
-    slit_w   = clip_pin_d * 0.85;                     // スナップ保持スリット幅（ピンより狭い）
-    rb       = clip_boss_r;                           // 意匠の丸め（外形 bbox は従来と同一）
-    difference() {
-        // 全エッジ丸めの角丸柱（minkowski 球）。根元(z_top)側だけは角を残さず
-        //   そのまま裏面壁へ食い込ませたいので、内核を z_top - rb まで伸ばす…と
-        //   キャビティ(電池室)を突くため z_top 止まり: 根元の丸みは小フィレット状に見える。
-        for (s = [-1, 1]) {
-            yb = clip_pin_y + s * (clip_boss_gap / 2 + clip_boss_w / 2);
-            minkowski() {
-                translate([clip_pin_x - clip_boss_l / 2 + rb, yb - clip_boss_w / 2 + rb, z_bot + rb])
-                    cube([clip_boss_l - 2 * rb, clip_boss_w - 2 * rb, (z_top - rb) - (z_bot + rb)]);
-                sphere(r = rb);
-            }
-        }
-        // ピン座（Y 軸円筒シート）
-        translate([clip_pin_x, clip_pin_y - peb_w, clip_pin_z])
-            rotate([-90, 0, 0])
-                cylinder(d = clip_pin_d + 2 * clr, h = 2 * peb_w);
-        // スナップ挿入スリット（-Z 外側 → 座。ピンより狭くして抜け止め）
-        translate([clip_pin_x - slit_w / 2, clip_pin_y - peb_w, z_bot - 1])
-            cube([slit_w, 2 * peb_w, clip_pin_z - (z_bot - 1)]);
+// 形: 背面マウントの J 形。剛体の根本ブロックが背面の頭寄りから下り、テーパー腕が
+// 尾(+X)へ伸びる。布は尾側の先端フレアからスライドインし、本体背面の半円ビード ×
+// 腕の平面で clip_pinch=0.4 までつままれる。たわむのは腕だけ（応力設計と印刷方向の
+// 根拠は params_pebble.scad §2 のコメント参照）。
+// 印刷（リム面ベッド = 背面が上向き）: ビードと根本は背面から上へ育ちサポート不要。
+// 腕の下（背面との clip_gap=2.0 の空間）はサポート必須 — 痕が出るのは腕に隠れる
+// 背面領域と腕の内面（つまみ面）のみ。
+module clip_flex() {
+    z_back    = peb_z_bot;                    // 背面（外面）
+    z_arm_top = z_back - clip_gap;            // 腕 上面（背面と対向するつまみ面）
+    z_arm_bot = z_arm_top - clip_arm_t;       // 腕 下面（外側）
+    x_flare   = clip_tip_x - clip_flare_l;    // フレア開始 x
+    w_flare   = clip_arm_w1 + (clip_arm_w0 - clip_arm_w1) * clip_flare_l / clip_arm_l;
+                                              // フレア開始位置でのテーパー幅
+    // Y 軸の薄バー（hull の断面駒。x 中心 ±0.05）
+    module ybar(x, w, z0, z1) {
+        translate([x - 0.05, peb_cy - w / 2, z0]) cube([0.1, w, z1 - z0]);
+    }
+    // 1) 根本ブロック（剛体）: 背面へ clip_root_weld 食い込み、-X/-Z 外角は丸め。
+    //    層をまたぐ向きだが断面 7×20 で層間応力は数 MPa（params §2）。
+    hull() {
+        ybar(clip_root_x + 0.05, clip_arm_w0, z_back - 0.01, z_back + clip_root_weld);
+        ybar(clip_arm_x0, clip_arm_w0, z_arm_bot, z_back + clip_root_weld);
+        translate([clip_root_x + clip_root_r, peb_cy - clip_arm_w0 / 2, z_arm_bot + clip_root_r])
+            rotate([-90, 0, 0]) cylinder(r = clip_root_r, h = clip_arm_w0);
+    }
+    // 2) 内隅フィレット（腕付け根の応力集中の緩和。布の差し込みはここで止まる）
+    hull() {
+        ybar(clip_arm_x0, clip_arm_w0, z_arm_top - 0.01, z_arm_top + clip_fillet_z);
+        ybar(clip_arm_x0 + clip_fillet_x, clip_arm_w0, z_arm_top - 0.01, z_arm_top);
+    }
+    // 3) 腕（テーパー平板 = たわみ部。印刷で水平スラブ → 曲げは層内方向）
+    hull() {
+        ybar(clip_arm_x0, clip_arm_w0, z_arm_bot, z_arm_top);
+        ybar(x_flare, w_flare, z_arm_bot, z_arm_top);
+    }
+    // 4) フレア + 丸め先端（外側(-Z)へ clip_flare_drop 逃げて布の呼び込み口を開く）
+    hull() {
+        ybar(x_flare, w_flare, z_arm_bot, z_arm_top);
+        translate([clip_tip_x - clip_arm_t / 2, peb_cy - clip_arm_w1 / 2,
+                   z_arm_bot - clip_flare_drop + clip_arm_t / 2])
+            rotate([-90, 0, 0]) cylinder(d = clip_arm_t, h = clip_arm_w1);
+    }
+    // 5) つまみビード（本体背面側の Y 半円柱。腕内面のリブだと印刷で下向き面になるため
+    //    本体側 = 印刷で上向きに育つ面に置く。上半分は壁の食い込み深さでトリムして
+    //    キャビティ（電池室）を突かない）
+    intersection() {
+        translate([clip_bead_x, peb_cy - clip_bead_w / 2, z_back])
+            rotate([-90, 0, 0]) cylinder(r = clip_bead_r, h = clip_bead_w);
+        translate([clip_bead_x - clip_bead_r - 1, peb_cy - clip_bead_w / 2 - 1,
+                   z_back - clip_bead_r - 1])
+            cube([2 * (clip_bead_r + 1), clip_bead_w + 2, (clip_bead_r + 1) + clip_root_weld]);
     }
 }
 
 // =====================================================================
-// クリップ: 可動腕（別パーツとして書き出し）
-// =====================================================================
-// ナックル（barrel でピンを抱く。+Y 寄せ。-Y にコイルを置く）＋ 裏面を覆う有機パッド ＋
-// 先端の掴み返し ＋ ランヤードタブ（溝付き）。腕側のバネ脚スロットも持つ。閉位置で表示。
-module clip_arm() {
-    xh      = clip_pin_x + clip_boss_l / 2 + 0.5;            // パッド頭縁（ボスより尾側）
-    pad_cx  = xh + clip_arm_l / 2;                            // パッド中心 X
-    az_top  = peb_z_bot - clip_gap;                           // 裏面側の面
-    az_bot  = az_top - clip_arm_t;                            // 外側の面
-    tip_x   = xh + clip_arm_l;                                // パッド尾縁
-    knu_od  = clip_pin_d + 2 * 1.4;                          // ナックル外径 = 6.4
-    knu_w   = 5;                                              // ナックル幅(Y)
-    knu_y0  = peb_cy + 2.5 - knu_w / 2;                      // ナックルは +Y 寄せ（-Y にコイル）
-    boss_clr = 0.5;                                           // ボス内面との片側クリアランス
-    neck_w  = clip_boss_gap - 2 * boss_clr;                  // ネック幅 = ボス内法 - 両側クリア
-    // ボス掃引半径: ピン軸からボス外縁角までの距離 + 余裕。腕の回転中もボスに当てない刳りの半径
-    swing_r = sqrt(pow(clip_boss_l / 2, 2) + pow(clip_boss_over + clip_pin_drop, 2)) + 0.4;
-    difference() {
-        union() {
-            // 有機パッド（裏面を覆う envsense ロゴ面）
-            translate([pad_cx, peb_cy, az_bot])
-                linear_extrude(height = clip_arm_t)
-                    superellipse2d(clip_arm_l / 2, clip_arm_w / 2, clip_arm_n, peb_seg);
-            // ナックル barrel（ピンを抱く。裏面直下まで届く）
-            translate([clip_pin_x, knu_y0, clip_pin_z])
-                rotate([-90, 0, 0]) cylinder(d = knu_od, h = knu_w);
-            // ナックル→パッドのネック。★幅はボス内法 - クリアランス（neck_w）に絞る:
-            //   ボス間を通る部分を旧 hull のように 2/3 パッド幅へ広げると内法 12 を超えて
-            //   組めない（蓋が閉まらない以前にナックルがボス間に入らない）
-            hull() {
-                translate([clip_pin_x, knu_y0, clip_pin_z])
-                    rotate([-90, 0, 0]) cylinder(d = knu_od, h = knu_w);
-                translate([xh, clip_pin_y - neck_w / 2, az_bot])
-                    cube([0.1, neck_w, clip_arm_t]);
-            }
-            // 先端 掴み返し（パッド面から裏面へ斜めに立ち上がり、先端で裏面に接して掴む）
-            hull() {
-                translate([tip_x - clip_lip_l, peb_cy - clip_arm_w / 3, az_bot])
-                    cube([0.1, clip_arm_w * 2 / 3, clip_arm_t]);
-                translate([tip_x - 0.1, peb_cy - clip_arm_w / 3, az_bot])
-                    cube([0.1, clip_arm_w * 2 / 3, (peb_z_bot - 0.1) - az_bot]);
-            }
-            // ランヤードタブ（尾へ張り出す）
-            translate([tip_x, peb_cy - lanyard_w / 2 - 1.5, az_bot])
-                cube([lanyard_tab_l, lanyard_w + 3, clip_arm_t]);
-        }
-        // ピン穴（Y 軸貫通）
-        translate([clip_pin_x, peb_cy - peb_w, clip_pin_z])
-            rotate([-90, 0, 0])
-                cylinder(d = clip_pin_d + 2 * clr, h = 2 * peb_w);
-        // ボス回転クリアランス: ピン軸まわり半径 swing_r の円筒を、ボス y 帯
-        //   （内面 - boss_clr から外側）で刳る。パッドの肩がどの開き角でも
-        //   ボスに当たらない掃引体クリアランス（回転は Y 軸なので y 幅は不変）。
-        for (s = [-1, 1])
-            translate([clip_pin_x, clip_pin_y + s * (clip_boss_gap / 2 - boss_clr), clip_pin_z])
-                rotate([-s * 90, 0, 0]) cylinder(r = swing_r, h = 30);
-        // 腕側 バネ脚スロット（コイル近傍 → +X。可動脚を受けて腕を駆動。実装で角度微調整）
-        // TODO[バネ]: 実バネの脚長・曲げが出たら角度/深さを確定。
-        translate([clip_pin_x, clip_spring_y - (clip_spring_wire + 2 * clr) / 2, az_top - 1.2])
-            cube([clip_spring_leg * 0.6, clip_spring_wire + 2 * clr, 1.4]);
-        // ランヤード溝
-        translate([tip_x + (lanyard_tab_l - lanyard_l) / 2, peb_cy - lanyard_w / 2, az_bot - 1])
-            cube([lanyard_l, lanyard_w, clip_arm_t + 2]);
-    }
-}
-
-// 本体側 バネ固定脚のアンカー（差し込み穴）。固定脚は -Y 側ボス内へ逃がす。
-//   ※ 裏壁は薄い(1.6mm)ので +Z に掘るとキャビティ(電池室)を貫く → ボス肉内(裏面より下)に留める。
-// TODO[バネ]: 実バネ(脚16/巻右/使用角57°)合わせで位置・深さ・向きを最終化。脚は切詰め。
-module clip_leg_anchor_body() {
-    yb   = clip_pin_y - (clip_boss_gap / 2 + clip_boss_w / 2);   // -Y ボス中心
-    zleg = clip_pin_z - clip_pin_d / 2 - clip_spring_wire;       // ピン直下（ボス肉内）
-    translate([clip_pin_x - clip_boss_l / 2 - 1, yb, zleg])
-        rotate([0, 90, 0]) cylinder(d = clip_spring_wire + 2 * clr, h = clip_boss_l + 2);
-}
-
-// クリップ: ピン・バネのモック（別調達品。アセンブリ確認用）
-module clip_pin_mock() {
-    color("Silver")
-        translate([clip_pin_x, clip_pin_y - (clip_boss_gap / 2 + clip_boss_w), clip_pin_z])
-            rotate([-90, 0, 0])
-                cylinder(d = clip_pin_d, h = clip_boss_gap + 2 * clip_boss_w);
-}
-
-module clip_spring_mock() {
-    // 選定トーションばね（33-0444 / 内4・線0.6・OD5.2）のコイル＋脚を簡易表現。
-    color("DimGray") {
-        // コイル部（軸方向 clip_spring_w、-Y 寄り）
-        translate([clip_pin_x, clip_spring_y - clip_spring_w / 2, clip_pin_z])
-            rotate([-90, 0, 0])
-                difference() {
-                    cylinder(d = clip_spring_od, h = clip_spring_w);
-                    translate([0, 0, -1]) cylinder(d = clip_spring_id, h = clip_spring_w + 2);
-                }
-        // 固定脚（コイル → -Y 側ボスのアンカーへ。代表表示）
-        translate([clip_pin_x - clip_spring_wire / 2,
-                   clip_pin_y - (clip_boss_gap / 2 + clip_boss_w / 2),
-                   clip_pin_z - clip_spring_wire / 2])
-            cube([clip_spring_wire,
-                  clip_spring_y - (clip_pin_y - (clip_boss_gap / 2 + clip_boss_w / 2)),
-                  clip_spring_wire]);
-        // 可動脚（+X 方向：腕スロットへ）
-        translate([clip_pin_x, clip_spring_y - clip_spring_wire / 2, peb_z_bot - clip_gap - clip_spring_wire])
-            cube([clip_spring_leg * 0.6, clip_spring_wire, clip_spring_wire]);
-    }
-}
-
-// =====================================================================
-// 合わせ目の印籠 + スナップ嵌合（pebble 専用: 舌=トップ / 溝=ボトム）
+// 合わせ目の印籠 + スナップ嵌合（pebble 専用: 舌=トップ / 溝=ボトム / バネ=ボトム横梁）
 // =====================================================================
 // box の mating_lip/mating_groove（舌=ボトム・輪郭基準）は使わない。理由と配置の
-// 設計値（lip_off）は params_pebble.scad の「合わせ目」コメント参照。
-//   - peb_mating_lip   : トップから z=0 を下へ -lip_h 降りる舌。先端リードは下端。
-//   - peb_mating_groove: ボトムのリム面（z=0、印刷時はベッド一層目）に掘る受け溝。
-//   - peb_snap_beads   : 舌（トップ）の外面の半円ビード。
-//   - peb_snap_pockets : ボトムの溝外壁のキャッチポケット。リム面直下 0.6 が係止リッジ。
-// 被せると舌が内へ撓み、ビードがリッジを越えてポケットへ落ちて係止（再開可能）。
+// 設計値（lip_off）、および リング撓み式→マグネット→フィンガー式→横梁ラッチ の経緯と
+// 設計値（catch_* / snap_* / latch_*）は params_pebble.scad の「合わせ目」コメント参照。
+//   - peb_mating_lip    : トップから z=0 を下へ -lip_h 降りる舌。先端リードは下端。
+//   - peb_mating_groove : ボトムのリム面（z=0、印刷時はベッド一層目）に掘る受け溝。
+//   - peb_snap_catches  : 舌の 4 箇所を -catch_l へ延長した剛体キャッチ舌＋外面ビード（トップ）。
+//   - peb_latch_pockets : ボトム側の深ポケット＋溝外壁を片持ち梁に切り出すスリット群（difference）。
 
 // キャビティ輪郭から外側 [o0, o1] の帯（印籠リングの 2D 断面）
 module peb_lip_ring2d(o0, o1) {
@@ -325,32 +239,84 @@ module peb_mating_groove() {
             peb_lip_ring2d(lip_off - lip_clr, lip_off + lip_t + lip_clr);
 }
 
-module peb_snap_beads() {
-    for (px = snap_xs)
-        for (face = [cav_y0 - (lip_off + lip_t), cav_y1 + (lip_off + lip_t)])
-            translate([px - snap_len / 2, face, -snap_z])
-                rotate([0, 90, 0])
-                    cylinder(r = snap_proj, h = snap_len, $fn = 24);
+// 剛体キャッチ舌（トップ所属）: snap_xs × 長辺±Y の 4 箇所で、舌と同じ帯
+// （輪郭 + [lip_off, lip_off+lip_t]）を z=0 → -catch_l の角柱に延長し、先端リード
+// （舌と同じ各面絞り）と外面の半円ビードを付ける。スリットは設けない＝リングと一体の剛体。
+// 撓むのはボトムの横梁なので、トップ側は層間（伏せ印刷の水平層界面）に曲げ応力が乗らない。
+// ビードは梁の自由端(+X)寄りにオフセット（根本から遠い＝低ひずみで押し退けられる位置）。
+module peb_snap_catches() {
+    lead = 0.8;   // 先端リードの高さ（peb_mating_lip と同値）
+    led  = 0.4;   // 先端を各面で絞る量
+    for (px = snap_xs, side = [-1, 1]) {
+        y_in   = (side < 0) ? cav_y0 - (lip_off + lip_t) : cav_y1 + lip_off;            // 帯の y 下端
+        y_face = (side < 0) ? cav_y0 - (lip_off + lip_t) : cav_y1 + (lip_off + lip_t);  // 外面
+        // 本体（リードの上まで）
+        translate([px - catch_w / 2, y_in, -(catch_l - lead)])
+            cube([catch_w, lip_t, catch_l - lead]);
+        // 先端リード（x/y 両絞り）
+        hull() {
+            translate([px - catch_w / 2, y_in, -(catch_l - lead)])
+                cube([catch_w, lip_t, 0.01]);
+            translate([px - catch_w / 2 + led, y_in + led, -catch_l])
+                cube([catch_w - 2 * led, lip_t - 2 * led, 0.01]);
+        }
+        // 外面ビード（X 軸の半円柱。中心を外面に置き、半分が外へ出る。+X 寄せ）
+        translate([px + snap_bead_off - snap_bead_l / 2, y_face, -snap_bead_z])
+            rotate([0, 90, 0]) cylinder(r = snap_proj, h = snap_bead_l, $fn = 24);
+    }
 }
 
-module peb_snap_pockets() {
-    depth = snap_proj + 0.6;                    // ビードが収まる外向き深さ
-    z0    = -(lip_h + 3);                       // 下は壁内へ逃がす
-    z1    = -(snap_z - 0.2);                    // ポケット上端（リム面との間が係止リッジ）
-    for (px = snap_xs)
-        for (s = [[cav_y0 - (lip_off + lip_t), -1], [cav_y1 + (lip_off + lip_t), 1]]) {
-            face = s[0]; dir = s[1];
-            ya = face; yb = face + dir * depth;
-            translate([px - (snap_len + 1) / 2, min(ya, yb), z0])
-                cube([snap_len + 1, abs(yb - ya), z1 - z0]);
+// 輪郭外側の帯直方体ヘルパ（ラッチ加工用）。side = -1/+1 で ±Y の長辺、
+// [o0, o1] = 輪郭（cav_y0/cav_y1）からの外向きオフセット範囲、x/z はそのまま。
+module latch_band(side, x0, x1, o0, o1, z0, z1) {
+    translate([x0, (side < 0) ? cav_y0 - o1 : cav_y1 + o0, z0])
+        cube([x1 - x0, o1 - o0, z1 - z0]);
+}
+
+// ボトム側のラッチ加工（difference）。各キャッチ位置で:
+//   1) 深ポケット: 溝を -(catch_l + catch_tip_clr) まで局所延長（キャッチ舌の降下コラム）。
+//      キャッチは剛体で撓まないため、③で要った内壁の撓み逃げ（0.5mm 薄壁）は廃止。
+//   2) ビード逃げ: 梁の下（z < -(溝深さ+latch_slit)）でビードの出っ張りぶん外へ拡幅。
+//   3) 梁の切り出し: 溝外壁の帯（厚さ latch_t）を「背後の逃げ溝＋下の水平スリット＋
+//      自由端(+X)の縦スリット」で三方切り離し、根本(−X)端だけで持つ横向き片持ち梁にする。
+//   4) 呼び込み面取り: 梁上端の内縁を 45° で落とす（進入するビードのカム面）。
+// 印刷（リム面ベッド）: 梁はベッドから立つ壁の一部（根本側でリングと連続＝島にならない）、
+// 逃げ溝/縦スリットはベッドから開く縦穴、水平スリットの上は 1.8mm の短ブリッジ。
+module peb_latch_pockets() {
+    in0 = lip_off - lip_clr;             // 深ポケット内面（= 通常溝と同じ。輪郭から 0.7）
+    in1 = lip_off + lip_t + lip_clr;     // 深ポケット外面 = 梁の内面（輪郭から 2.3）
+    pw  = catch_w + 2 * catch_xy_clr;    // 深ポケット X 幅
+    pd  = snap_proj - lip_clr + 0.25;    // ビード逃げの外向き深さ（残り 0.3 + 余裕）
+    gd  = lip_h + 0.2;                   // 溝深さ = 梁下端
+    zb  = -(catch_l + catch_tip_clr);    // 深ポケット底
+    for (px = snap_xs, side = [-1, 1]) {
+        // 1) 深ポケット
+        latch_band(side, px - pw / 2, px + pw / 2, in0, in1, zb, 0.02);
+        // 2) ビード逃げ（梁の下のみ。ビード x 窓 + 0.4）
+        latch_band(side, px + snap_bead_off - snap_bead_l / 2 - 0.4,
+                         px + snap_bead_off + snap_bead_l / 2 + 0.4,
+                         in1, in1 + pd, zb, -(gd + latch_slit));
+        // 3) 梁の切り出し
+        latch_band(side, px - latch_x0, px + latch_x1 + 1.0,                  // 背後の逃げ溝
+                         in1 + latch_t, in1 + latch_t + latch_gap, -(gd + latch_slit), 0.02);
+        latch_band(side, px - latch_x0, px + latch_x1 + 1.0,                  // 下の水平スリット
+                         in1, in1 + latch_t + latch_gap, -(gd + latch_slit), -gd);
+        latch_band(side, px + latch_x1, px + latch_x1 + 1.0,                  // 自由端の縦スリット
+                         in1, in1 + latch_t + latch_gap, -(gd + latch_slit), 0.02);
+        // 4) 呼び込み面取り（梁上端内縁の 45° ウェッジ = 2 帯の hull）
+        hull() {
+            latch_band(side, px - latch_x0, px + latch_x1, in1, in1 + latch_cham, -0.01, 0.02);
+            latch_band(side, px - latch_x0, px + latch_x1, in1, in1 + 0.01, -latch_cham, 0.02);
         }
+    }
 }
 
 // =====================================================================
 // 分割（z=0 で本体/蓋）
 // =====================================================================
 // bottom = z<=0（バッテリー / メイン基板 / クリップ側）, top = z>=0（USB-C / Sense / カメラ側）
-// クリップ機構(ボス)は裏面側 → bottom に union。
+// 一体クリップは裏面側 → bottom に union（クリップは z < peb_z_bot+1 ≈ -12 に収まり、
+// USB/レンズ/マイク開口とは z 帯が重ならないため開口の再適用は不要）。
 module pebble_enclosure_bottom() {
     big = 300;
     difference() {
@@ -359,15 +325,10 @@ module pebble_enclosure_bottom() {
                 pebble_shell_solid();
                 translate([peb_cx - big / 2, peb_cy - big / 2, -big]) cube([big, big, big]);
             }
-            clip_bosses();     // 裏面のヒンジボス
+            clip_flex();       // 裏面の一体成形クリップ
         }
-        peb_mating_groove();   // 舌を受ける溝（★pebble は溝がボトム = リム面がベッド一層目）
-        peb_snap_pockets();    // ビードを受ける係止ポケット
-        // 開口はボスにも適用（プラグ挿入路を塞がない）
-        cut_usb_peb();
-        cut_lens();
-        cut_mic();
-        clip_leg_anchor_body();   // バネ固定脚の差し込み穴
+        peb_mating_groove();      // 舌を受ける溝（★pebble は溝がボトム = リム面がベッド一層目）
+        peb_latch_pockets();      // キャッチ受け（深ポケット + 横梁ラッチの切り出し ×4）
     }
 }
 
@@ -379,15 +340,15 @@ module pebble_enclosure_top() {
                 pebble_shell_solid();
                 translate([peb_cx - big / 2, peb_cy - big / 2, 0]) cube([big, big, big]);
             }
-            tail_backstop();   // 板尾止めリブ ×2（z=0 をまたいで下へ突出。トップ所属）
-            peb_mating_lip();  // 合わせ目の舌（z=0 → -lip_h。★pebble は舌がトップ所属）
-            peb_snap_beads();  // 舌外面のスナップビード（係止突起）
+            tail_backstop();    // 板尾止めリブ ×2（z=0 をまたいで下へ突出。トップ所属）
+            peb_mating_lip();   // 合わせ目の舌（z=0 → -lip_h。★pebble は舌がトップ所属）
+            peb_snap_catches(); // 剛体キャッチ舌 ×4（舌の局所延長 + ビード。トップ所属）
         }
         cut_usb_peb();         // 舌は頭端の USB 開口を横切るので開口を再適用
         cut_sd_peb();          // microSD 縦チャネル（トップ半身専用 — module コメント参照）
     }
 }
 
-// このファイル単体で開いたときはシェル + クリップ腕を表示
+// このファイル単体で開いたときはシェル + 一体クリップを表示
 pebble_shell_solid();
-clip_arm();
+clip_flex();

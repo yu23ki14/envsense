@@ -15,8 +15,8 @@ The Phase 1 OpenSCAD design skeleton exists in `clip/`:
 | `parts.scad` | Mock of the internal parts (board / Sense board / camera / battery) used both for assembly fit-check and as the `difference()` negative. |
 | `enclosure.scad` | The shell: rounded outer box minus cavity minus openings (USB-C / SD / lens / mic), split into `enclosure_bottom()` / `enclosure_top()` at z=0. Also holds the board retention (4-corner clamps) and the `lip`/`groove` mating joint. |
 | `params_pebble.scad` | **pebble variant** params: river-stone outer form + a back clip. `include`s `params.scad` and reuses all electronics/cavity values; only adds outer-shape and clip design knobs. The single source of truth for the variant's design values (these are choices, not measured parts, so they are NOT in dimensions.md). |
-| `enclosure_pebble.scad` | **pebble variant** shell + clip. Reuses `cavity()`/`cut_*()`/`corner_grips()` from `enclosure.scad` unchanged; replaces the outer form (superellipse plate → crown, hull-blended), swaps the mating joint to its own `peb_mating_lip/groove` (tongue on the TOP — see Closure below), and adds the pivot-spring clip (`clip_bosses()` on the body, `clip_arm()` as a separate printable part, plus pin/spring mocks). |
-| `clip.scad` | Top-level. `variant` toggles `box` (default, Phase 1) / `pebble`; `mode` toggles assembly / shell / bottom / top / parts (+ `clip_arm` for pebble) and drives CLI export. |
+| `enclosure_pebble.scad` | **pebble variant** shell + clip. Reuses `cavity()`/`cut_*()`/`corner_grips()` from `enclosure.scad` unchanged; replaces the outer form (superellipse plate → crown, hull-blended), swaps the mating joint to its own `peb_mating_lip/groove` (tongue on the TOP — see Closure below), and adds the one-piece flex clip (`clip_flex()`, unioned into the bottom — no separate parts). |
+| `clip.scad` | Top-level. `variant` toggles `box` (default, Phase 1) / `pebble`; `mode` toggles assembly / shell / bottom / top / parts and drives CLI export. |
 
 When you edit OpenSCAD files, match the variable names exactly to the "OpenSCAD variable name"
 column in dimensions.md — `params.scad` already does this; keep it in sync.
@@ -56,31 +56,34 @@ the bottom tub, a full-width tail wall in the bottom would block insertion. So `
 **not** call `tail_backstop()`; instead `enclosure_top()` / `pebble_enclosure_top()` union it
 **outside** the `z>0` intersection so its `z<0` portion survives and reaches down to the board tail
 edge. Closing the lid lowers the backstop across `z=0` to lock the board in +X; a `-X` lead-in
-chamfer (`ch`) nudges a +X-drifted board back. **Shape: two cantilever ribs hung from the cavity
-ceiling** (`backstop_seg_w` × `backstop_t`) at the board-tail shoulders — when the lid is printed
-face-down they grow straight up off the ceiling, so no layer starts in mid-air (the earlier low
-cross-wall only existed near `z=0` and its first printed layer was an unsupported bridge between
-the side walls). The rib front face sits at the **Sense tail + `clr` (x=22.0) for the full height**
-— anything further -X would scrape the Sense tail edge during the vertical close, since the Sense
-overhangs the main-board tail. Near the ceiling each rib carries a **brow** (`z_sense_top + 0.3`,
-reaching 1.2 mm over the Sense tail) that limits board-tail lift to 0.3 mm without touching the
-Sense in the normal state; its underside faces down in model space, i.e. up in the face-down
-print, so it adds no overhang. The centre stays fully open — it is the battery-lead / antenna
-pass-through (the former `cut_wire_notch` is gone) and clears the pebble touch-pad pocket
-(`cav_cy ± 6`). The ribs stay `clr` inside the cavity in Y so the `z<0` portion clears the bottom
-wall and tongue. Assembly order: drop battery+board into the open bottom, route leads through the
-centre opening, then close the top.
+chamfer (`ch`) nudges a +X-drifted board back. **Shape: a single cantilever rib hung from the cavity
+ceiling** (`backstop_w` × `backstop_t`), pushed against the **+Y wall** (was two shoulder ribs; merged
+2026-06 for wiring) — when the lid is printed face-down it grows straight up off the ceiling, so no
+layer starts in mid-air (the earlier low cross-wall only existed near `z=0` and its first printed
+layer was an unsupported bridge between the side walls). The rib front face sits at the **Sense tail
++ `clr` (x=22.0) for the full height** — anything further -X would scrape the Sense tail edge during
+the vertical close, since the Sense overhangs the main-board tail. Near the ceiling the rib carries a
+**brow** (`z_sense_top + 0.3`, reaching 1.2 mm over the Sense tail) that limits board-tail lift to
+0.3 mm without touching the Sense in the normal state; its underside faces down in model space, i.e.
+up in the face-down print, so it adds no overhang. The 7.3 mm width overlaps the Sense tail edge by
+6.1 mm — more bearing than the old two ribs combined (2.3 + 2.3); the off-centre +X reaction yaws the
+board slightly, which the tail corners' long-edge grips (below z=0) take. The **−Y side of the tail
+ceiling is fully open** — it is the battery-lead / antenna pass-through (the former `cut_wire_notch`
+is gone) and hosts the pebble touch-pad pocket, which moved −Y with it (`touch_pad_pos` y =
+`cav_y0`+6.5; pocket top edge y=11.0 keeps 0.5 to the rib inner edge y=11.5). The rib stays `clr`
+inside the cavity in Y so the `z<0` portion clears the bottom wall and tongue. Assembly order: drop
+battery+board into the open bottom, route leads through the −Y opening, then close the top.
 
 Open TODOs: the **camera pocket / lens-bore alignment** still needs `cam_rot` (unmeasured in
 dimensions.md §7); and screw bosses are intentionally omitted. Wires/antenna route through the
-**open centre between the two backstop ribs** (the dedicated `cut_wire_notch` was removed along
-with the `wire_notch_*` params). Validate any geometry edit with a headless render
+**open −Y side of the tail ceiling, beside the single backstop rib** (the dedicated `cut_wire_notch`
+was removed along with the `wire_notch_*` params). Validate any geometry edit with a headless render
 (`Status: NoError` = watertight) — `openscad` is installed via the `openscad@snapshot` cask.
 
 ### microSD relief (the inserted card overhangs the head)
 
 The Sense board's microSD slot (a cage on the Sense **component (+Z) face**, between the USB top
-z=3.0 and the camera base z=6.4) lets the inserted card protrude to **x = -2.5** (`sd_protrude`,
+z=3.0 and the camera base z=7.75) lets the inserted card protrude to **x = -2.5** (`sd_protrude`,
 measured) — 0.6 mm past the cavity head wall's inner face. The card's z/y envelope is **ASSUMED**
 (`sd_z0`/`sd_y0` in params.scad, mocked by `sd_card()` in parts.scad) — verify on hardware.
 
@@ -102,7 +105,7 @@ measured) — 0.6 mm past the cavity head wall's inner face. The card's z/y enve
 ### pebble variant (product-shaped outer + back clip)
 
 A second outer form aimed at the product look (`hardware/clip/device_image_*` reference): a **river-stone
-body** with a large **pivot + torsion-spring back clip** for stable wear. It is a *variant*, not a fork —
+body** with a **one-piece flex back clip** (shirt-clip style) for stable wear. It is a *variant*, not a fork —
 **the electronics layout, cavity, board retention and openings are identical** and come from `enclosure.scad`
 via `use`. Only the outer shell is replaced and the clip is added.
 
@@ -112,40 +115,52 @@ via `use`. Only the outer shell is replaced and the clip is added.
 - **Outer form** (`pebble_outer_solid`): a flat back plate → widest "waist" → cavity-covering "crown"
   (sphere-rounded top), blended with one `hull()`. The crown must enclose the cavity footprint so the top /
   upper-side walls keep thickness — `crown_margin` is that wall budget. Height auto-fits the cavity
-  (`peb_z_top`/`peb_z_bot` derive from it; ≈22.85 mm, within the 20–23 mm target). The cavity is tall (camera
-  stack ~15 mm) so the achievable shape is a *flat* river stone, not a tall dome — that is geometric, not a
-  tuning miss. `peb_l`/`peb_w` are the image targets (50×38); the generous XY margin is what leaves room to
+  (`peb_z_top`/`peb_z_bot` derive from it; ≈25.8 mm — the 20–23 mm image target is knowingly exceeded, a
+  2026-06 decision: `top_headroom` plus the camera raise (`cam_tip_h`=13, clearing the SD card / FPC-fold
+  interference) take priority). The cavity is tall (camera stack 13 mm) so the achievable shape is a *flat*
+  river stone, not a tall dome — that is geometric, not a tuning miss. `peb_l`/`peb_w` are the image targets (50×38); the generous XY margin is what leaves room to
   round the top edge without thinning the wall over the cavity.
-- **Clip** (`clip_bosses` + `clip_arm`): hinge at the head (-X) end, pin axis along Y. Bosses are on the body
-  (added to the **bottom** half); the arm is a **separate printable part** (`mode="clip_arm"`) with a central
-  knuckle (a barrel, offset to +Y so the coil sits beside it on -Y) over the back, an organic pad, an angled
-  grip tip that meets the back face, and a lanyard slot. The bosses use a **snap-in pin seat** (a Y-cylinder
-  seat with a `-Z`-facing slit narrower than the pin) so the pin — and thus the clip — is captured into the
-  body. The hinge sits well below the back (clip protrudes ~6.6 mm), clear of the USB-C opening (z ≈ 0–6).
-  - **Spring (selected): MonotaRO 33-0444** (confirmed spec) — torsion, **SUS304-WPB**, wire 0.6 / ID 4 /
-    **OD 5.2** / free angle 135° / 3.125 turns / **arm(leg) 16 mm** / **working angle 57°** / **RH wound** /
-    RoHS / rate 0.457 N·mm/° → design torque ≈ 26 N·mm. Same-mount stiffer swap: 33-0441. The hinge is sized
-    to it: **pin Ø3.0** (FDM proto: easy-to-source φ3 rod / M3 through the ID-4 coil, ~0.5 mm play — go Ø3.5
-    for the final to tighten it), pin dropped `clip_pin_drop` so the OD-5.2 coil clears the
-    back, plus a **body-side leg anchor** (`clip_leg_anchor_body`, routed into the **-Y boss** — NOT +Z, since
-    the 1.6 mm back wall would otherwise be punched through into the battery cavity) and an **arm-side leg
-    slot**. Spring values live in `params_pebble.scad` (`clip_spring_*`). Pin and spring are off-the-shelf
-    (mocks only in CAD). TODO[spring]: finalize leg-anchor angle/depth (~78° installed = 135−57) and grip
-    force by bench test; legs are trimmed to length.
+- **Clip** (`clip_flex`, replaced the pivot + torsion-spring design 2026-06 — pin/spring sourcing and the
+  hinge history live in git): a **one-piece flex clip** (shirt-clip style) unioned into the **bottom** half —
+  no sourced parts, no assembly step. Shape: a rigid root block drops from the back near the head (-X), a
+  **tapered arm** (w 20→14, t 2.4) runs toward the tail; garment slides in from the tail past a flared tip and
+  is pinched between a **half-round bead on the BODY back face** and the flat arm (`clip_pinch` 0.4 at the
+  bead crest). The stress design follows the FDM strain limits that killed the snap fingers (~2–3% in-plane,
+  half that across layers): the **only flexing member is the arm**, which prints as a horizontal slab
+  (mating-face-down bottom) so bending stress is in-plane; the **root block crosses layers but is bulky**
+  (7×20 footprint welded 1.0 into the back wall) so its interlayer stress stays at a few MPa. Design point
+  (PETG, E≈2 GPa): k = E·w·t³/4L³ ≈ 5–6 N/mm → ~3.5 N pinch on 1 mm fabric; 3 mm opening ≈ 1.2% root strain
+  (in-plane, elastic). **Print PETG, not PLA** (creep + brittleness). The bead lives on the body, not the arm,
+  because the body back face prints facing up (clean), while the arm's gripping face prints facing down; the
+  arm-to-back running gap is `clip_gap` 2.0 — deliberately support-sized, since a uniform 0.4 gap can't hold
+  support and would print in mid-air. Supports stand on the back face under the arm; scars hide under the arm.
+  Total protrusion below the back ≈ 5.9 mm (was ~7.4 with the hinge). All values are `clip_*` in
+  `params_pebble.scad` §2. TODO[clip]: bench-check pinch force / fatigue on a printed unit.
 - **USB-C opening** (`cut_usb_peb`, NOT the box `cut_usb`): the stone head wall is ~7.5 mm thick, far too deep
   for the box's thin-wall cut (which never reaches the outer surface). The pebble cut is a stepped **overmold
   counterbore + a slot tunneling to the receptacle**, so a real plug reaches the connector. If you move the
   layout or `peb_l`/`peb_cx`, re-check the well depth in render.
 - **Closure**: the z=0 tongue/groove is the alignment + sandwich retention (board located in the bottom tub,
   top caps + retains via the head corner-clamp pushers). **pebble puts the tongue on the TOP and the groove in
-  the bottom** (`peb_mating_lip`/`peb_mating_groove`, NOT the box `mating_lip`/`mating_groove`): the clip
-  bosses force the bottom to print mating-face-down, and a bottom-side tongue would leave the rim hanging 2 mm
+  the bottom** (`peb_mating_lip`/`peb_mating_groove`, NOT the box `mating_lip`/`mating_groove`): the integrated
+  clip forces the bottom to print mating-face-down, and a bottom-side tongue would leave the rim hanging 2 mm
   above the bed as a rough downward-facing ledge — with the groove in the bottom, the rim *is* the first layer.
   The ring is pushed `lip_off` (1.0) outside the cavity outline so the bottom groove does not sever the corner
-  clamps' side-wall welds (`lip_off - lip_clr ≥ weld` is the invariant). Snap-fit detents ride along:
-  `peb_snap_beads()` (on the top tongue's outer face) drop into `peb_snap_pockets()` (in the bottom's groove
-  wall, the rim-side 0.6 mm being the catch ridge), 4 total on the long sides. The **thin tongue (1 mm) flexes
-  inward** during insertion since the stone outer wall is rigid — keep that in mind if you retune `snap_proj`.
+  clamps' side-wall welds (`lip_off - lip_clr ≥ weld` is the invariant). Retention is **rigid catch tongues on
+  the top × sideways latch beams in the bottom** (`peb_snap_catches` / `peb_latch_pockets`; design values
+  `catch_*`/`snap_*`/`latch_*` in `params_pebble.scad`): at `snap_xs` × both long sides the tongue is locally
+  extended into a rigid 4 mm catch (fused to the ring, no slits — it never flexes) carrying a half-round bead
+  (`snap_proj` 0.6, offset toward +X); the bottom's groove outer wall is locally cut free into a horizontal
+  cantilever beam (relief void behind, `latch_slit` 0.4 below, vertical end slit at +X, root at the −X end)
+  with a 45° lead-in chamfer on its top inner edge. Closing cams the beam outward 0.3 and the bead clicks
+  under the beam's bottom edge (0.05 preload bite); opening cams the beam back over the bead's round top —
+  reopenable, non-destructive. **The flexing member lives in the bottom on purpose**: its mating-face-down
+  print makes beam bending in-plane (along perimeters), ε ≈ 1.5×1.2×0.3/7² ≈ 1.3% in the strong direction,
+  while nothing on the top flexes at all. History (all 2026-06): full-ring snap → ~11% strain, the 0.8 mm
+  bottom ridge yielded; magnets (3 glued 2.3×1.7×1.5 pairs) → too weak; 6 mm top-side snap fingers → the
+  face-down print makes them vertical cantilevers, bending tension landed on the root layer seam and they
+  tore off. If you move `snap_*`/`latch_*`, re-render the closed-state intersection of both halves — the only
+  intended overlap is the 4 bead-preload slivers.
 
 ## Build / export (OpenSCAD)
 
@@ -168,10 +183,9 @@ openscad -D 'mode="top"'    -o clip/export/clip_top.stl    clip/clip.scad
 # 3MF carries mm units in metadata — preferred over STL for OEM handoff:
 openscad -D 'mode="bottom"' -o clip/export/clip_bottom.3mf clip/clip.scad
 
-# pebble variant (add -D 'variant="pebble"'; the clip arm is its own part):
-openscad -D 'variant="pebble"' -D 'mode="bottom"'   -o clip/export/pebble_bottom.stl clip/clip.scad
-openscad -D 'variant="pebble"' -D 'mode="top"'      -o clip/export/pebble_top.stl    clip/clip.scad
-openscad -D 'variant="pebble"' -D 'mode="clip_arm"' -o clip/export/pebble_clip.stl   clip/clip.scad
+# pebble variant (add -D 'variant="pebble"'; the flex clip is part of the bottom):
+openscad -D 'variant="pebble"' -D 'mode="bottom"' -o clip/export/pebble_bottom.stl clip/clip.scad
+openscad -D 'variant="pebble"' -D 'mode="top"'    -o clip/export/pebble_top.stl    clip/clip.scad
 ```
 
 The CGAL render log prints `Simple: yes` when the mesh is 2-manifold (watertight) — verify this
