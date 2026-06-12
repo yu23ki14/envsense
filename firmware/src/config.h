@@ -12,7 +12,7 @@
 // DEVICE CONFIGURATION
 // =============================================================================
 #define BLE_DEVICE_NAME "envsense"
-#define FIRMWARE_VERSION_STRING "2.4.0"
+#define FIRMWARE_VERSION_STRING "2.5.0"
 #define HARDWARE_REVISION "ESP32-S3-v1.0"
 #define MANUFACTURER_NAME "envsense"
 
@@ -20,8 +20,13 @@
 // POWER MANAGEMENT - Optimized for MINIMUM 6-8 hours, targeting 10+ hours
 // =============================================================================
 // CPU Frequency Management - Aggressive power optimization
+// NOTE: below 80MHz the CPU clocks from the 40MHz XTAL and the PLL powers
+// down, which kills the I2S/PDM mic clock. While always-on VAD capture is
+// running the device must stay at NORMAL_CPU_FREQ_MHZ; MIN_CPU_FREQ_MHZ is
+// only safe when the mic is stopped. The real idle savings come from VAD
+// skipping the Opus encode + SD writes during silence.
 #define MAX_CPU_FREQ_MHZ 100   // Further reduced from 120MHz - still sufficient
-#define MIN_CPU_FREQ_MHZ 40    // Ultra-low power for idle states
+#define MIN_CPU_FREQ_MHZ 40    // Ultra-low power, mic-off states only (see note above)
 #define NORMAL_CPU_FREQ_MHZ 80 // Normal operation frequency (good balance)
 
 // Sleep Management
@@ -129,7 +134,10 @@ typedef enum {
 #define MIC_SAMPLE_RATE 16000          // 16kHz sample rate
 #define MIC_BUFFER_SAMPLES 1600        // 100ms buffer (16000 * 0.1)
 #define MIC_GAIN 4                     // Microphone gain multiplier (clamped to int16 in mic.cpp)
-#define AUDIO_RING_BUFFER_SAMPLES 8000 // 500ms of audio data
+// Must hold the VAD pre-roll flush (1s) plus live PCM headroom: when speech
+// starts, vad.cpp dumps VAD_PREROLL_MS of buffered samples into this ring at
+// once, before opus_process() drains it.
+#define AUDIO_RING_BUFFER_SAMPLES 24000 // 1.5s of audio data (PSRAM)
 
 // =============================================================================
 // OPUS CODEC CONFIGURATION
@@ -146,6 +154,45 @@ typedef enum {
 #define AUDIO_TX_RING_BUFFER_SIZE 64   // Encoded frames buffered (~1.3s) to ride out TX stalls
 
 // =============================================================================
+// VAD (Voice Activity Detection) - silence is neither encoded nor stored
+// =============================================================================
+// Energy VAD over 20ms PCM frames (after MIC_GAIN). The threshold is the mean
+// absolute amplitude of a frame; tune on-device with VAD_DEBUG_LOG if speech
+// is clipped or noise leaks through.
+#define VAD_THRESHOLD 700           // Mean |amplitude| (int16) above which a frame is voiced
+#define VAD_TRIGGER_FRAMES 2        // Consecutive voiced frames to start an utterance (40ms)
+#define VAD_HANGOVER_MS 5000        // Silence that ends an utterance (bridges normal speech pauses)
+#define VAD_PREROLL_MS 1000         // PCM kept before the trigger so speech onsets aren't clipped
+#define VAD_DEBUG_LOG 0             // 1: log per-second frame energy for threshold calibration
+
+// =============================================================================
+// MICROSD STORAGE - SD-first capture (XIAO ESP32S3 Sense expansion board)
+// =============================================================================
+// The Sense board's microSD sits on the default SPI bus (SCK=GPIO7, MISO=GPIO8,
+// MOSI=GPIO9) with CS on GPIO21. GPIO21 is ALSO the user LED (STATUS_LED_PIN):
+// once the SD card is mounted the firmware stops driving the LED entirely --
+// any digitalWrite to it would yank the card's chip select mid-transaction and
+// corrupt the filesystem. The LED is only used before storage_init().
+#define SD_CS_PIN 21
+#define SD_SPI_FREQ_HZ 20000000     // 20MHz; conservative for wiring through the expansion board
+#define AUDIO_DIR "/audio"          // Utterance files: <epoch_ms>.opp (length-prefixed Opus frames)
+#define PHOTO_DIR "/photo"          // Photo files: <epoch_ms>_<orientation>.jpg
+#define AUDIO_FILE_MAX_MS 300000    // Split utterances at 5 min to bound the BLE transfer unit
+#define STORAGE_FLUSH_BYTES 4096    // Buffer audio frames and write to SD in 4KB batches
+// Clocks below this (2021-01-01 UTC) are "invalid": the RTC lost power and the
+// app hasn't written TIME_SYNC yet. Files recorded before the first sync get
+// their timestamps shifted forward when the real time arrives.
+#define CLOCK_VALID_MIN_EPOCH_MS 1609459200000ULL
+
+// =============================================================================
+// SYNC TRANSFER - bulk file transfer to the app over BLE (see SYNC_* UUIDs)
+// =============================================================================
+#define SYNC_MANIFEST_MAX_ENTRIES 2048 // Manifest table in PSRAM (~1 day of photos + utterances)
+#define SYNC_CHUNKS_PER_LOOP 16        // File chunks sent per loop_app() pass (keeps touch/button responsive)
+#define SYNC_CHUNK_DELAY_MS 3          // Pause between chunk notifications so the BLE stack can flush
+#define SYNC_STATUS_INTERVAL_MS 10000  // Min interval between unsynced-stats notifications
+
+// =============================================================================
 // BLE UUID DEFINITIONS - envsense Protocol
 // envsense-specific 128-bit UUID series (base EA80xxxx-9C72-497F-81F9-752FFE11F565),
 // distinct from the OMI/Friend protocol UUIDs to avoid collisions with omi devices.
@@ -157,10 +204,40 @@ typedef enum {
 #define PHOTO_DATA_UUID "EA800005-9C72-497F-81F9-752FFE11F565"
 #define PHOTO_CONTROL_UUID "EA800006-9C72-497F-81F9-752FFE11F565"
 #define POWER_CONTROL_UUID "EA800007-9C72-497F-81F9-752FFE11F565"
+#define SYNC_STATUS_UUID "EA800008-9C72-497F-81F9-752FFE11F565"
+#define SYNC_CONTROL_UUID "EA800009-9C72-497F-81F9-752FFE11F565"
+#define SYNC_DATA_UUID "EA80000A-9C72-497F-81F9-752FFE11F565"
+#define TIME_SYNC_UUID "EA80000B-9C72-497F-81F9-752FFE11F565"
 
 // Power commands (written to POWER_CONTROL_UUID)
 #define POWER_CMD_SLEEP 0x01  // Enter deep sleep (same as touch / button long press)
 #define POWER_CMD_REBOOT 0x02 // Restart the device
+
+// -----------------------------------------------------------------------------
+// Sync protocol (microSD -> app bulk transfer). All integers little-endian.
+//
+// TIME_SYNC (write): [u64 epoch_ms] -- the app writes this on every connect.
+//
+// SYNC_STATUS (read/notify): [u16 audioFiles][u16 photoFiles][u32 totalBytes][u8 flags]
+#define SYNC_FLAG_SD_OK 0x01      // SD card mounted; SD-first capture is active
+#define SYNC_FLAG_CLOCK_VALID 0x02 // Device clock has been set since the last power loss
+//
+// SYNC_CONTROL (write): [cmd, ...]
+#define SYNC_CMD_MANIFEST 0x01  // [cmd] -> manifest entries stream over SYNC_DATA
+#define SYNC_CMD_GET_FILE 0x02  // [cmd][u32 fileId] -> file chunks stream over SYNC_DATA
+#define SYNC_CMD_ACK_FILE 0x03  // [cmd][u32 fileId] -> file verified by the app; delete from SD
+#define SYNC_CMD_ABORT 0x04     // [cmd] -> stop the current transfer
+//
+// SYNC_DATA (notify): first byte is the packet type
+#define SYNC_PKT_MANIFEST_END 0x00 // [type][u16 entryCount]
+#define SYNC_PKT_MANIFEST 0x01     // [type][u8 n] then n * ([u32 id][u8 fileType][u32 size][u64 epochMs][u8 orientation])
+#define SYNC_PKT_CHUNK 0x02        // [type][u32 id][u16 seq][payload...]
+#define SYNC_PKT_FILE_END 0x03     // [type][u32 id][u32 crc32(IEEE)]
+#define SYNC_PKT_ERROR 0x7F        // [type][u32 id] -- requested file unavailable
+#define SYNC_MANIFEST_ENTRY_BYTES 18
+#define SYNC_FILE_TYPE_AUDIO 0
+#define SYNC_FILE_TYPE_PHOTO 1
+// -----------------------------------------------------------------------------
 
 // Battery Service UUID - Cast to uint16_t for BLE compatibility
 #define BATTERY_SERVICE_UUID (uint16_t) 0x180F

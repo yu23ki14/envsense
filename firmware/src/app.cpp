@@ -8,11 +8,14 @@
 
 #include "config.h" // Use config.h for all configurations
 #include "driver/rtc_io.h"
+#include "esp_rom_crc.h"
 #include "esp_camera.h"
 #include "esp_sleep.h"
 #include "mic.h"
 #include "opus_encoder.h"
 #include "ota.h"
+#include "storage.h"
+#include "vad.h"
 
 // Battery state
 float batteryVoltage = 0.0f;
@@ -64,6 +67,10 @@ static BLEUUID photoControlUUID(PHOTO_CONTROL_UUID);
 static BLEUUID powerControlUUID(POWER_CONTROL_UUID);
 static BLEUUID audioDataUUID(AUDIO_DATA_UUID);
 static BLEUUID audioCodecUUID(AUDIO_CODEC_UUID);
+static BLEUUID syncStatusUUID(SYNC_STATUS_UUID);
+static BLEUUID syncControlUUID(SYNC_CONTROL_UUID);
+static BLEUUID syncDataUUID(SYNC_DATA_UUID);
+static BLEUUID timeSyncUUID(TIME_SYNC_UUID);
 
 // OTA Service UUIDs
 static BLEUUID otaServiceUUID(OTA_SERVICE_UUID);
@@ -79,6 +86,10 @@ BLECharacteristic *audioDataCharacteristic;
 BLECharacteristic *audioCodecCharacteristic;
 BLECharacteristic *otaControlCharacteristic;
 BLECharacteristic *otaDataCharacteristic;
+BLECharacteristic *syncStatusCharacteristic;
+BLECharacteristic *syncControlCharacteristic;
+BLECharacteristic *syncDataCharacteristic;
+BLECharacteristic *timeSyncCharacteristic;
 
 // Audio state
 bool audioEnabled = true;
@@ -109,6 +120,41 @@ size_t sent_photo_bytes = 0;
 size_t sent_photo_frames = 0;
 bool photoDataUploading = false;
 
+// ---------------------------------------------------------------------------------
+// SD-first capture / sync state
+// ---------------------------------------------------------------------------------
+// The utterance close is deferred to the audio task loop so it runs after
+// opus_process() has encoded the final voiced PCM (the VAD state callback
+// fires mid-mic_process, before encoding).
+static volatile bool utteranceEndPending = false;
+
+// TIME_SYNC writes are applied in loop_app: storage_set_time may rename files
+// on the card, which is too slow for a BLE callback.
+static volatile bool timeSyncPending = false;
+static volatile uint64_t timeSyncValue = 0;
+
+// Sync transfer state machine (loop_app). BLE callbacks only set the request
+// flags; all SD reads and notifications happen in the loop.
+typedef enum { SYNC_IDLE, SYNC_SENDING_MANIFEST, SYNC_SENDING_FILE } sync_state_t;
+static sync_state_t syncState = SYNC_IDLE;
+static volatile bool syncManifestRequested = false;
+static volatile bool syncFileRequested = false;
+static volatile uint32_t syncRequestedFileId = 0;
+static volatile bool syncAbortRequested = false;
+static volatile uint32_t syncAckQueue[8];
+static volatile uint8_t syncAckHead = 0;
+static volatile uint8_t syncAckTail = 0;
+
+static manifest_entry_t *syncManifest = nullptr; // PSRAM, allocated on first manifest request
+static int syncManifestCount = 0;
+static bool syncManifestBuilt = false;
+static int syncManifestSendIndex = 0;
+static manifest_entry_t *syncFile = nullptr; // Entry currently being streamed
+static uint32_t syncFileOffset = 0;
+static uint16_t syncFileSeq = 0;
+static uint32_t syncFileCrc = 0;
+static uint8_t syncTxBuffer[BLE_MTU_SIZE];
+
 // -------------------------------------------------------------------------
 // Camera Frame
 // -------------------------------------------------------------------------
@@ -135,6 +181,10 @@ void onMicData(int16_t *data, size_t samples);
 void onOpusEncoded(uint8_t *data, size_t len);
 void processAudioTx();
 
+// Sync forward declarations
+void updateSyncStatus(bool notifyApp);
+void processSync(unsigned long now);
+
 // -------------------------------------------------------------------------
 // Button ISR
 // -------------------------------------------------------------------------
@@ -155,6 +205,17 @@ void updateLED()
     unsigned long now = millis();
     static unsigned long bootStartTime = 0;
     static unsigned long powerOffStartTime = 0;
+
+    // GPIO21 is shared between the user LED and the SD card's chip select
+    // (XIAO ESP32S3 Sense). Once the card is mounted the LED must never be
+    // driven again -- toggling CS mid-transaction corrupts the filesystem.
+    // Power-off still works; it just skips the farewell blink.
+    if (storage_available()) {
+        if (ledMode == LED_POWER_OFF_SEQUENCE) {
+            shutdownDevice();
+        }
+        return;
+    }
 
     switch (ledMode) {
     case LED_BOOT_SEQUENCE:
@@ -407,7 +468,13 @@ void handleTouch()
 void enterPowerSave()
 {
     if (!powerSaveMode) {
-        setCpuFrequencyMhz(MIN_CPU_FREQ_MHZ); // 40MHz for idle
+        // Below 80MHz the PLL powers down and takes the I2S/PDM mic clock
+        // with it, so the 40MHz floor is only allowed when the mic is off.
+        // With always-on VAD capture the savings come from skipping the Opus
+        // encode + SD writes during silence, not from the CPU clock.
+        if (!mic_is_running()) {
+            setCpuFrequencyMhz(MIN_CPU_FREQ_MHZ); // 40MHz for idle
+        }
         powerSaveMode = true;
     }
 }
@@ -422,8 +489,10 @@ void exitPowerSave()
 
 void enableLightSleep()
 {
-    if (!lightSleepEnabled || !connected || photoDataUploading) {
-        return; // Don't sleep if disabled, not connected, or uploading
+    // Light sleep gates the I2S DMA clock, so it is incompatible with the
+    // always-on VAD capture; it only ever fires when the mic is stopped.
+    if (!lightSleepEnabled || !connected || photoDataUploading || mic_is_running() || syncState != SYNC_IDLE) {
+        return;
     }
 
     unsigned long now = millis();
@@ -458,8 +527,15 @@ void shutdownDevice()
 {
     Serial.println("Shutting down device...");
 
-    // Stop audio
+    // Stop audio. The audio task checks mic_is_running() once per iteration,
+    // so give an in-flight encode/SD-write pass time to finish before the
+    // card is unmounted underneath it.
     mic_stop();
+    delay(150);
+
+    // Close the open utterance and unmount the card before anything touches
+    // GPIO21 (shared LED / SD CS pin).
+    storage_shutdown();
 
     // Stop photo capture
     isCapturingPhotos = false;
@@ -498,14 +574,42 @@ void shutdownDevice()
 // -------------------------------------------------------------------------
 void onMicData(int16_t *data, size_t samples)
 {
-    // Feed PCM data to Opus encoder
+    // The VAD decides what reaches the encoder: silence stays in its pre-roll
+    // ring and is never encoded or stored.
+    vad_process(data, samples);
+}
+
+// Voiced PCM only (pre-roll flush + live frames while speaking).
+void onVoicedPcm(int16_t *data, size_t samples)
+{
     opus_receive_pcm(data, samples);
+}
+
+void onVadStateChange(bool speaking)
+{
+    if (speaking) {
+        uint64_t now = storage_now_ms();
+        uint64_t start = now > VAD_PREROLL_MS ? now - VAD_PREROLL_MS : now;
+        storage_audio_begin_utterance(start);
+    } else {
+        // Close after opus_process() has encoded the trailing frames.
+        utteranceEndPending = true;
+    }
 }
 
 void onOpusEncoded(uint8_t *data, size_t len)
 {
-    // Store encoded data in TX ring buffer
     if (len > OPUS_OUTPUT_MAX_BYTES) {
+        return;
+    }
+
+    // SD-first: every encoded frame lands in the current utterance file. The
+    // BLE TX ring below is the legacy live stream, still served when an app
+    // explicitly subscribes (debug / no-SD fallback).
+    if (storage_audio_utterance_open()) {
+        storage_audio_write_frame(data, (uint16_t) len);
+    }
+    if (!connected || !audioSubscribed) {
         return;
     }
 
@@ -612,12 +716,17 @@ static TaskHandle_t audioTaskHandle = nullptr;
 void audioTask(void *param)
 {
     for (;;) {
-        // 接続中かつ購読中のときだけエンコードする。未接続時に回し続けると
-        // i2s DMA 詰まり時に i2s_read が即 return してタスクが core1 を占有し、
-        // tick/割り込みが飢餓して Interrupt WDT(TG1WDT) リセットになるため。
-        if (audioEnabled && mic_is_running() && connected && audioSubscribed) {
+        // SDファースト化により常時キャプチャする（接続有無に依存しない）。
+        // VAD が無音を落とすので、無音中は opus_process() がエンコードする
+        // フレーム自体が無く、CPU と SD への負荷は発話中だけに収まる。
+        if (audioEnabled && mic_is_running()) {
             mic_process(); // i2s_read でブロック → 他タスク/割り込みに譲る
             opus_process();
+            // 発話終了は opus_process が末尾フレームを書き終えた後に確定させる
+            if (utteranceEndPending) {
+                utteranceEndPending = false;
+                storage_audio_end_utterance();
+            }
             // 送信もこのタスク内で即ドレインする。loop_app(core0)で送ると写真送信
             // などでループが詰まる間に TX リングが溢れてフレームを落とすため、
             // producer(opus_process)と同じ core1 タスクで直後に送って溢れを防ぐ。
@@ -641,14 +750,18 @@ class ServerHandler : public BLEServerCallbacks
         audioSubscribed = false;
         lastActivity = millis(); // Register activity - prevents sleep
         Serial.println(">>> BLE Client connected.");
-        // Send current battery level on connect
+        // Send current battery level and unsynced stats on connect
         updateBatteryService();
+        updateSyncStatus(true);
     }
     void onDisconnect(BLEServer *server) override
     {
         connected = false;
         audioSubscribed = false;
         negotiatedMtu = 23; // back to the BLE default until the next negotiation
+        // Drop any in-flight sync transfer; the manifest ids are connection-
+        // scoped, so the app starts over from SYNC_CMD_MANIFEST on reconnect.
+        syncAbortRequested = true;
         Serial.println("<<< BLE Client disconnected. Restarting advertising.");
         BLEDevice::startAdvertising();
     }
@@ -720,6 +833,63 @@ class PowerControlCallback : public BLECharacteristicCallbacks
                 rebootRequested = true;
             }
         }
+    }
+};
+
+// Sync commands only set flags here; the SD work and the notifications all
+// happen in processSync() on the main loop (BLE callbacks must stay fast).
+class SyncControlCallback : public BLECharacteristicCallbacks
+{
+    void onWrite(BLECharacteristic *characteristic) override
+    {
+        uint8_t *data = characteristic->getData();
+        size_t len = characteristic->getLength();
+        if (len < 1) {
+            return;
+        }
+        lastActivity = millis();
+        uint32_t fileId = 0;
+        if (len >= 5) {
+            fileId = (uint32_t) data[1] | ((uint32_t) data[2] << 8) | ((uint32_t) data[3] << 16) |
+                     ((uint32_t) data[4] << 24);
+        }
+        switch (data[0]) {
+        case SYNC_CMD_MANIFEST:
+            syncManifestRequested = true;
+            break;
+        case SYNC_CMD_GET_FILE:
+            syncRequestedFileId = fileId;
+            syncFileRequested = true;
+            break;
+        case SYNC_CMD_ACK_FILE: {
+            uint8_t nextHead = (syncAckHead + 1) % 8;
+            if (nextHead != syncAckTail) { // Queue full: drop; the app retries unacked files next sync
+                syncAckQueue[syncAckHead] = fileId;
+                syncAckHead = nextHead;
+            }
+            break;
+        }
+        case SYNC_CMD_ABORT:
+            syncAbortRequested = true;
+            break;
+        }
+    }
+};
+
+class TimeSyncCallback : public BLECharacteristicCallbacks
+{
+    void onWrite(BLECharacteristic *characteristic) override
+    {
+        if (characteristic->getLength() != 8) {
+            return;
+        }
+        uint8_t *data = characteristic->getData();
+        uint64_t epochMs = 0;
+        for (int i = 7; i >= 0; i--) {
+            epochMs = (epochMs << 8) | data[i];
+        }
+        timeSyncValue = epochMs;
+        timeSyncPending = true; // Applied in loop_app: may rename files on SD
     }
 };
 
@@ -818,6 +988,205 @@ void updateBatteryService()
 }
 
 // -------------------------------------------------------------------------
+// Sync (microSD -> app bulk transfer over SYNC_DATA notifications)
+// -------------------------------------------------------------------------
+void updateSyncStatus(bool notifyApp)
+{
+    if (syncStatusCharacteristic == nullptr) {
+        return;
+    }
+    uint16_t audioCount = 0;
+    uint16_t photoCount = 0;
+    uint32_t totalBytes = 0;
+    storage_stats(&audioCount, &photoCount, &totalBytes);
+    uint8_t flags = 0;
+    if (storage_available()) {
+        flags |= SYNC_FLAG_SD_OK;
+    }
+    if (storage_clock_valid()) {
+        flags |= SYNC_FLAG_CLOCK_VALID;
+    }
+    uint8_t payload[9];
+    payload[0] = audioCount & 0xFF;
+    payload[1] = audioCount >> 8;
+    payload[2] = photoCount & 0xFF;
+    payload[3] = photoCount >> 8;
+    memcpy(&payload[4], &totalBytes, 4);
+    payload[8] = flags;
+    syncStatusCharacteristic->setValue(payload, sizeof(payload));
+    if (notifyApp && connected) {
+        syncStatusCharacteristic->notify();
+    }
+}
+
+// One notification's worth of usable bytes for the current connection.
+static size_t syncMaxValue()
+{
+    size_t maxValue = (negotiatedMtu > 10) ? (size_t) (negotiatedMtu - 3) : 20;
+    if (maxValue > sizeof(syncTxBuffer)) {
+        maxValue = sizeof(syncTxBuffer);
+    }
+    return maxValue;
+}
+
+static manifest_entry_t *findManifestEntry(uint32_t id)
+{
+    if (!syncManifestBuilt || id == 0 || id > (uint32_t) syncManifestCount) {
+        return nullptr;
+    }
+    return &syncManifest[id - 1]; // Ids are assigned 1..count at build time
+}
+
+static void syncSendFileError(uint32_t id)
+{
+    syncTxBuffer[0] = SYNC_PKT_ERROR;
+    memcpy(&syncTxBuffer[1], &id, 4);
+    syncDataCharacteristic->setValue(syncTxBuffer, 5);
+    syncDataCharacteristic->notify();
+}
+
+// Drives the sync transfer a bounded amount per loop_app() pass so the touch
+// sensor / button / photo capture stay responsive during multi-minute syncs.
+void processSync(unsigned long now)
+{
+    if (syncAbortRequested) {
+        syncAbortRequested = false;
+        syncState = SYNC_IDLE;
+        syncFile = nullptr;
+        if (!connected) {
+            syncManifestBuilt = false; // Ids are connection-scoped
+        }
+    }
+
+    // Deferred clock set (may rename unsynced files on the card).
+    if (timeSyncPending) {
+        timeSyncPending = false;
+        storage_set_time(timeSyncValue);
+        updateSyncStatus(true); // Clock-valid flag changed
+    }
+
+    if (!connected || syncDataCharacteristic == nullptr) {
+        return;
+    }
+
+    // Deletions for files the app verified. Throttled implicitly by the queue
+    // depth; each delete is a single FAT operation.
+    while (syncAckTail != syncAckHead) {
+        uint32_t id = syncAckQueue[syncAckTail];
+        syncAckTail = (syncAckTail + 1) % 8;
+        manifest_entry_t *entry = findManifestEntry(id);
+        if (entry != nullptr && entry->path[0] != '\0') {
+            storage_delete_file(entry->path, entry->type, entry->size);
+            entry->path[0] = '\0'; // Guard against double-ack
+        }
+    }
+
+    if (syncManifestRequested) {
+        syncManifestRequested = false;
+        if (syncManifest == nullptr) {
+            syncManifest = (manifest_entry_t *) ps_malloc(SYNC_MANIFEST_MAX_ENTRIES * sizeof(manifest_entry_t));
+        }
+        if (syncManifest != nullptr) {
+            syncManifestCount = storage_build_manifest(syncManifest, SYNC_MANIFEST_MAX_ENTRIES);
+            syncManifestBuilt = true;
+            syncManifestSendIndex = 0;
+            syncState = SYNC_SENDING_MANIFEST;
+            Serial.printf("sync: manifest built (%d entries)\n", syncManifestCount);
+        }
+    }
+
+    if (syncFileRequested) {
+        syncFileRequested = false;
+        manifest_entry_t *entry = findManifestEntry(syncRequestedFileId);
+        if (entry == nullptr || entry->path[0] == '\0') {
+            syncSendFileError(syncRequestedFileId);
+        } else {
+            syncFile = entry;
+            syncFileOffset = 0;
+            syncFileSeq = 0;
+            syncFileCrc = 0;
+            syncState = SYNC_SENDING_FILE;
+        }
+    }
+
+    if (syncState == SYNC_SENDING_MANIFEST) {
+        size_t maxValue = syncMaxValue();
+        int perPacket = (int) ((maxValue - 2) / SYNC_MANIFEST_ENTRY_BYTES);
+        if (perPacket > 255) {
+            perPacket = 255;
+        }
+        for (int burst = 0; burst < SYNC_CHUNKS_PER_LOOP && syncState == SYNC_SENDING_MANIFEST; burst++) {
+            if (syncManifestSendIndex >= syncManifestCount) {
+                syncTxBuffer[0] = SYNC_PKT_MANIFEST_END;
+                uint16_t count = (uint16_t) syncManifestCount;
+                memcpy(&syncTxBuffer[1], &count, 2);
+                syncDataCharacteristic->setValue(syncTxBuffer, 3);
+                syncDataCharacteristic->notify();
+                syncState = SYNC_IDLE;
+                break;
+            }
+            int n = syncManifestCount - syncManifestSendIndex;
+            if (n > perPacket) {
+                n = perPacket;
+            }
+            syncTxBuffer[0] = SYNC_PKT_MANIFEST;
+            syncTxBuffer[1] = (uint8_t) n;
+            size_t pos = 2;
+            for (int i = 0; i < n; i++) {
+                manifest_entry_t *e = &syncManifest[syncManifestSendIndex + i];
+                memcpy(&syncTxBuffer[pos], &e->id, 4);
+                syncTxBuffer[pos + 4] = e->type;
+                memcpy(&syncTxBuffer[pos + 5], &e->size, 4);
+                memcpy(&syncTxBuffer[pos + 9], &e->epochMs, 8);
+                syncTxBuffer[pos + 17] = e->orientation;
+                pos += SYNC_MANIFEST_ENTRY_BYTES;
+            }
+            syncManifestSendIndex += n;
+            syncDataCharacteristic->setValue(syncTxBuffer, pos);
+            syncDataCharacteristic->notify();
+            delay(SYNC_CHUNK_DELAY_MS);
+        }
+        lastActivity = now;
+        return;
+    }
+
+    if (syncState == SYNC_SENDING_FILE && syncFile != nullptr) {
+        size_t payloadMax = syncMaxValue() - 7; // [type][u32 id][u16 seq]
+        for (int burst = 0; burst < SYNC_CHUNKS_PER_LOOP && syncState == SYNC_SENDING_FILE; burst++) {
+            if (syncFileOffset >= syncFile->size) {
+                syncTxBuffer[0] = SYNC_PKT_FILE_END;
+                memcpy(&syncTxBuffer[1], &syncFile->id, 4);
+                memcpy(&syncTxBuffer[5], &syncFileCrc, 4);
+                syncDataCharacteristic->setValue(syncTxBuffer, 9);
+                syncDataCharacteristic->notify();
+                Serial.printf("sync: file %lu sent (%lu bytes)\n", (unsigned long) syncFile->id,
+                              (unsigned long) syncFile->size);
+                syncFile = nullptr;
+                syncState = SYNC_IDLE;
+                break;
+            }
+            int n = storage_read_file(syncFile->path, syncFileOffset, &syncTxBuffer[7], payloadMax);
+            if (n <= 0) {
+                syncSendFileError(syncFile->id);
+                syncFile = nullptr;
+                syncState = SYNC_IDLE;
+                break;
+            }
+            syncTxBuffer[0] = SYNC_PKT_CHUNK;
+            memcpy(&syncTxBuffer[1], &syncFile->id, 4);
+            memcpy(&syncTxBuffer[5], &syncFileSeq, 2);
+            syncFileCrc = esp_rom_crc32_le(syncFileCrc, &syncTxBuffer[7], n);
+            syncDataCharacteristic->setValue(syncTxBuffer, 7 + n);
+            syncDataCharacteristic->notify();
+            syncFileOffset += n;
+            syncFileSeq++;
+            delay(SYNC_CHUNK_DELAY_MS);
+        }
+        lastActivity = now;
+    }
+}
+
+// -------------------------------------------------------------------------
 // configure_ble()
 // -------------------------------------------------------------------------
 void configure_ble()
@@ -863,6 +1232,30 @@ void configure_ble()
     // Power Control characteristic (sleep / reboot commands from the app)
     powerControlCharacteristic = service->createCharacteristic(powerControlUUID, BLECharacteristic::PROPERTY_WRITE);
     powerControlCharacteristic->setCallbacks(new PowerControlCallback());
+
+    // Sync Status characteristic (unsynced file counts + flags)
+    syncStatusCharacteristic = service->createCharacteristic(
+        syncStatusUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    BLE2902 *syncStatusCcc = new BLE2902();
+    syncStatusCcc->setNotifications(true);
+    syncStatusCharacteristic->addDescriptor(syncStatusCcc);
+
+    // Sync Control characteristic (manifest / file requests, acks, abort)
+    syncControlCharacteristic = service->createCharacteristic(syncControlUUID, BLECharacteristic::PROPERTY_WRITE);
+    syncControlCharacteristic->setCallbacks(new SyncControlCallback());
+
+    // Sync Data characteristic (manifest entries + file chunks)
+    syncDataCharacteristic = service->createCharacteristic(
+        syncDataUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    BLE2902 *syncDataCcc = new BLE2902();
+    syncDataCcc->setNotifications(true);
+    syncDataCharacteristic->addDescriptor(syncDataCcc);
+
+    // Time Sync characteristic (the app writes epoch ms on every connect)
+    timeSyncCharacteristic = service->createCharacteristic(timeSyncUUID, BLECharacteristic::PROPERTY_WRITE);
+    timeSyncCharacteristic->setCallbacks(new TimeSyncCallback());
+
+    updateSyncStatus(false);
 
     // Battery Service
     BLEService *batteryService = server->createService(BATTERY_SERVICE_UUID);
@@ -1059,8 +1452,12 @@ void setup_app()
     // Calibrate the copper-foil touch sensor
     setupTouch();
 
-    // Start LED boot sequence
-    ledMode = LED_BOOT_SEQUENCE;
+    // Boot blink runs synchronously here because the LED pin doubles as the
+    // SD chip select: once storage_init() mounts the card the LED is hands-off
+    // (updateLED no-ops), so the async LED_BOOT_SEQUENCE would never show.
+    blinkLED(3, 150);
+    digitalWrite(STATUS_LED_PIN, HIGH); // Leave the pin deselected for the SD card
+    ledMode = LED_NORMAL_OPERATION;
 
     // Power optimization from config.h
     setCpuFrequencyMhz(NORMAL_CPU_FREQ_MHZ);
@@ -1068,6 +1465,11 @@ void setup_app()
 
     configure_ble();
     configure_camera();
+
+    // Mount the microSD card. With a card present the device records photos
+    // and VAD-gated audio to it continuously and the app pulls them via the
+    // sync protocol; without one it falls back to legacy live streaming.
+    storage_init();
 
     // Allocate buffer for photo chunks (200 bytes + 2 for frame index)
     s_compressed_frame_2 = (uint8_t *) ps_calloc(BLE_CHUNK_SIZE + 2, sizeof(uint8_t));
@@ -1077,8 +1479,12 @@ void setup_app()
         Serial.println("Chunk buffer allocated successfully.");
     }
 
-    // Set default capture interval from config
-    isCapturingPhotos = true;
+    // Set default capture interval from config. isCapturingPhotos now means
+    // "live BLE upload requested": with SD storage the interval capture runs
+    // unconditionally and live upload stays off until the app writes
+    // PHOTO_CONTROL; without SD the legacy default (stream when connected)
+    // is kept.
+    isCapturingPhotos = !storage_available();
     captureInterval = PHOTO_CAPTURE_INTERVAL_MS;
     lastCaptureTime = millis() - captureInterval;
     Serial.print("Default capture interval set to ");
@@ -1095,8 +1501,10 @@ void setup_app()
 
     // Initialize audio subsystem
     Serial.println("Initializing audio subsystem...");
-    if (opus_encoder_init()) {
+    if (opus_encoder_init() && vad_init()) {
         opus_set_callback(onOpusEncoded);
+        vad_set_pcm_callback(onVoicedPcm);
+        vad_set_state_callback(onVadStateChange);
 
         if (mic_start()) {
             mic_set_callback(onMicData);
@@ -1161,6 +1569,26 @@ void loop_app()
     // Process OTA updates
     ota_loop();
 
+    // Sync transfer (manifest / file chunks / acks / deferred time set)
+    processSync(now);
+
+    // Notify the app when the unsynced counts change (throttled; the app also
+    // reads SYNC_STATUS on connect).
+    static unsigned long lastSyncStatusUpdate = 0;
+    static uint32_t lastSyncStatusFingerprint = 0;
+    if (now - lastSyncStatusUpdate >= SYNC_STATUS_INTERVAL_MS) {
+        uint16_t audioCount = 0;
+        uint16_t photoCount = 0;
+        uint32_t totalBytes = 0;
+        storage_stats(&audioCount, &photoCount, &totalBytes);
+        uint32_t fingerprint = ((uint32_t) audioCount << 16) ^ photoCount ^ totalBytes;
+        if (fingerprint != lastSyncStatusFingerprint) {
+            updateSyncStatus(true);
+            lastSyncStatusFingerprint = fingerprint;
+        }
+        lastSyncStatusUpdate = now;
+    }
+
     // 音声のキャプチャ/エンコード/送信はすべて audioTask(専用タスク)で実行する。
     // ここ(loopTask)で送ると写真送信などでループが詰まる間に TX リングが溢れて
     // 音声フレームを落とすため、producer と同じタスク内で送るようにした。
@@ -1189,20 +1617,37 @@ void loop_app()
         firstBatteryUpdate = false;
     }
 
-    // Check if it's time to capture a photo
-    if (isCapturingPhotos && !photoDataUploading && connected) {
-        if ((captureInterval == 0) || (now - lastCaptureTime >= (unsigned long) captureInterval)) {
-            if (captureInterval == 0) {
-                // Single shot if interval=0
-                isCapturingPhotos = false;
+    // Check if it's time to capture a photo.
+    // SD-first: with a card mounted, photos are captured on the fixed interval
+    // regardless of the BLE connection and saved to the card; the app pulls
+    // them later via the sync protocol. The legacy live upload only runs when
+    // the app explicitly asked for it via PHOTO_CONTROL (isCapturingPhotos),
+    // which is also the no-SD fallback path.
+    bool singleShot = isCapturingPhotos && captureInterval == 0;
+    bool photoDue = singleShot || (now - lastCaptureTime >= (unsigned long) captureInterval);
+    bool wantPhoto = storage_available() ? true : (isCapturingPhotos && connected);
+    if (wantPhoto && !photoDataUploading && photoDue) {
+        bool wantLiveUpload = isCapturingPhotos && connected;
+        if (singleShot) {
+            isCapturingPhotos = false;
+            if (storage_available()) {
+                captureInterval = PHOTO_CAPTURE_INTERVAL_MS; // resume interval capture to SD
             }
-            Serial.println("Interval reached. Capturing photo...");
-            if (take_photo()) {
+        }
+        Serial.println("Interval reached. Capturing photo...");
+        if (take_photo()) {
+            lastCaptureTime = now;
+            if (storage_available()) {
+                storage_save_photo(fb->buf, fb->len, (uint8_t) current_photo_orientation);
+            }
+            if (wantLiveUpload) {
                 Serial.println("Photo capture successful. Starting upload...");
                 photoDataUploading = true;
                 sent_photo_bytes = 0;
                 sent_photo_frames = 0;
-                lastCaptureTime = now;
+            } else {
+                esp_camera_fb_return(fb);
+                fb = nullptr;
             }
         }
     }

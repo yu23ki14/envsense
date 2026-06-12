@@ -60,7 +60,9 @@ its image-rotation logic).
 
 ## BLE GATT services exposed
 
-- envsense main service (`EA800000-…`): audio data/codec, photo data/control
+- envsense main service (`EA800000-…`): audio data/codec, photo data/control, power control,
+  sync status/control/data + time sync (microSD bulk transfer; packet layouts are documented in
+  config.h's "Sync protocol" comment block)
 - Battery Service (`0x180F`) / Device Information Service (`0x180A`)
 - OTA service (`EA800010-…`): control + data (progress notifications)
 
@@ -76,6 +78,13 @@ collisions with OMI/Friend. **When you change it, update the companion app's BLE
 - There is no physical power switch. Power on/off is done via a long button press → deep sleep
   (the hardware design lives under `hardware/`; see `hardware/clip/dimensions.md`).
 - The camera is mounted upside down, so `FIXED_IMAGE_ORIENTATION` is set to 180°.
+- Capture is SD-first: with a microSD card mounted (Sense expansion board, SPI CS=GPIO21) photos
+  and VAD-gated audio are recorded continuously to the card and pulled by the app via the sync
+  protocol; without a card the firmware falls back to the legacy BLE live streaming. **GPIO21 is
+  shared between the user LED and the SD chip select** — once the card is mounted the LED must
+  never be driven (`updateLED` no-ops), or the filesystem gets corrupted.
+- While the mic runs (always, for VAD), the CPU must stay at 80MHz — below that the PLL powers
+  down and the I2S/PDM clock dies. Light sleep is likewise incompatible with always-on capture.
 
 ## Formatting
 
