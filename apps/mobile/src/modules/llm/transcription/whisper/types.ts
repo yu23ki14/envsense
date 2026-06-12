@@ -24,4 +24,6 @@ export interface WhisperEngine {
   isModelReady(modelId: string): Promise<boolean>;
   /** モデルをDL（進捗 0..1）。完了で ready 扱いになる。 */
   downloadModel(modelId: string, onProgress?: (fraction: number) => void): Promise<void>;
+  /** DL済みモデルを端末から削除する。以降は未準備（absent）扱いになる。 */
+  deleteModel(modelId: string): Promise<void>;
 }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { enqueueLocalInference } from './localQueue';
 import { loadWhisperEngine } from './transcription/whisper';
 
 export type WhisperModelStatus = 'unknown' | 'absent' | 'downloading' | 'ready';
@@ -9,6 +10,8 @@ export type UseWhisperModel = {
   progress: number;
   error: string | null;
   download: () => Promise<void>;
+  /** DL済みモデルを端末から削除する。成功で absent に戻る。 */
+  remove: () => Promise<void>;
 };
 
 /**
@@ -63,5 +66,17 @@ export function useWhisperModel(modelId: string): UseWhisperModel {
     }
   }, [modelId]);
 
-  return { status, progress, error, download };
+  const remove = useCallback(async () => {
+    setError(null);
+    try {
+      const engine = await loadWhisperEngine();
+      // 削除はロード済みエンジンを閉じるため、進行中のローカル推論と直列化する。
+      await enqueueLocalInference(() => engine.deleteModel(modelId));
+      if (mounted.current) setStatus('absent');
+    } catch (e) {
+      if (mounted.current) setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [modelId]);
+
+  return { status, progress, error, download, remove };
 }

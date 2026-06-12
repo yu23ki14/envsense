@@ -404,7 +404,19 @@ export function DeviceScreen() {
  * 未 DL の間はクラウドにフォールバックして動作する。
  */
 function LocalModelRow({ modelId }: { modelId: string }) {
-  const { status, progress, error, download } = useWhisperModel(modelId);
+  const { status, progress, error, download, remove } = useWhisperModel(modelId);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  const runDelete = async () => {
+    setDeleting(true);
+    try {
+      await remove();
+    } finally {
+      setDeleting(false);
+      setDeleteConfirmOpen(false);
+    }
+  };
 
   let detail = 'オフライン文字起こしに必要';
   if (status === 'unknown') detail = '確認中…';
@@ -429,12 +441,27 @@ function LocalModelRow({ modelId }: { modelId: string }) {
             ダウンロード
           </Button>
         ) : null}
+        {status === 'ready' ? (
+          <Button size="sm" variant="outline" onPress={() => setDeleteConfirmOpen(true)}>
+            削除
+          </Button>
+        ) : null}
       </View>
       {status === 'downloading' ? (
         <View style={styles.progressTrack}>
           <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} />
         </View>
       ) : null}
+
+      <ConfirmModal
+        visible={deleteConfirmOpen}
+        title="ローカルモデルを削除しますか？"
+        message="モデルファイルを端末から削除してストレージを空けます。再び使うには数GBの再ダウンロードが必要です。削除後はクラウドにフォールバックします。"
+        confirmLabel="削除"
+        busy={deleting}
+        onConfirm={runDelete}
+        onClose={() => setDeleteConfirmOpen(false)}
+      />
     </View>
   );
 }

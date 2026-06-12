@@ -13,4 +13,7 @@ export const whisperEngine: WhisperEngine = {
   downloadModel: async () => {
     throw new ModelUnavailableError('ローカルモデルのダウンロードは web では利用できません');
   },
+  deleteModel: async () => {
+    throw new ModelUnavailableError('ローカルモデルの削除は web では利用できません');
+  },
 };

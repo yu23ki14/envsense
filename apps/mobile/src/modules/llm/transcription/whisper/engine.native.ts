@@ -253,9 +253,26 @@ async function downloadModel(
   mmkv.set(pathKey(modelId), path);
 }
 
+async function deleteModel(modelId: string): Promise<void> {
+  // メモリにロード済みなら先にエンジンごと閉じて解放する（削除済みファイルを掴んだまま
+  // 推論し続けないため）。次回利用時は ensureLoaded が未準備として失敗 → クラウドへ。
+  if (loadedModel === modelId) {
+    if (llm != null) llm.close();
+    llm = null;
+    loadedModel = null;
+    loadedBackend = null;
+  }
+  const path = mmkv.getString(pathKey(modelId));
+  if (path != null && fileExists(path)) {
+    new File(path.startsWith('file://') ? path : `file://${path}`).delete();
+  }
+  mmkv.remove(pathKey(modelId));
+}
+
 export const whisperEngine: WhisperEngine = {
   transcribeFile,
   generateText,
   isModelReady,
   downloadModel,
+  deleteModel,
 };
