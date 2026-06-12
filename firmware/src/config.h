@@ -249,10 +249,20 @@ typedef enum {
 // =============================================================================
 #define TOUCH_SENSE_PIN 3           // GPIO3 (D2) - copper foil capacitive pad
 #define TOUCH_HOLD_OFF_MS 2000      // Hold duration to power off (same as button long press)
-#define TOUCH_DELTA_RATIO 0.12f     // Touched when raw > baseline * (1 + ratio); S3 raw rises on touch
-#define TOUCH_BASELINE_SAMPLES 16   // Boot-time calibration sample count (foil must be untouched)
-#define TOUCH_SAMPLE_INTERVAL_MS 50 // Polling interval in the main loop
-#define TOUCH_DEBUG_LOG 0           // 1: log raw values every second + LED mirrors touch state (calibration)
+#define TOUCH_TOUCH_RATIO 0.05f      // Enter touched state when filtered > baseline * (1 + ratio).
+                                     // Kept low because on battery the device ground floats and the
+                                     // touch delta shrinks to a fraction of the USB-powered value.
+#define TOUCH_RELEASE_RATIO 0.025f   // Leave touched state when filtered < baseline * (1 + ratio)
+#define TOUCH_FILTER_SAMPLES 5       // Raw reads per poll; the median rejects single-sample noise
+#define TOUCH_BASELINE_SAMPLES 16    // Boot-time calibration sample count (foil must be untouched)
+#define TOUCH_BASELINE_ALPHA 0.005f  // Baseline EMA rate for downward drift (~10s at 50ms poll)
+#define TOUCH_BASELINE_ALPHA_UP 0.0005f // Upward drift tracked 10x slower so a sub-threshold touch
+                                        // (small battery-powered delta) is not absorbed as baseline
+#define TOUCH_MEASURE_CYCLES 2000    // Touch FSM charge cycles per read (S3 default 500); longer
+                                     // integration = better SNR, which the low thresholds rely on
+#define TOUCH_SLEEP_CYCLES 0x0F      // Interval between HW measurements (S3 default)
+#define TOUCH_SAMPLE_INTERVAL_MS 50  // Polling interval in the main loop
+#define TOUCH_DEBUG_LOG 0            // 1: log raw values every second + LED mirrors touch state (calibration)
 
 // Power Button States
 typedef enum { BUTTON_IDLE, BUTTON_PRESSED, BUTTON_LONG_PRESS, BUTTON_RELEASED } button_state_t;

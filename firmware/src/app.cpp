@@ -268,13 +268,43 @@ void handleButton()
 // -------------------------------------------------------------------------
 // Touch Handling (copper foil on GPIO3 / TOUCH3)
 // -------------------------------------------------------------------------
-static inline uint32_t touchThreshold()
+static inline uint32_t touchOnThreshold()
 {
-    return (uint32_t) (touchBaseline * (1.0f + TOUCH_DELTA_RATIO));
+    return (uint32_t) (touchBaseline * (1.0f + TOUCH_TOUCH_RATIO));
+}
+
+static inline uint32_t touchOffThreshold()
+{
+    return (uint32_t) (touchBaseline * (1.0f + TOUCH_RELEASE_RATIO));
+}
+
+// Median of TOUCH_FILTER_SAMPLES raw reads; on battery power single samples
+// spike too much (camera / BLE load on the supply rail) to act on directly.
+static uint32_t touchReadFiltered()
+{
+    uint32_t s[TOUCH_FILTER_SAMPLES];
+    for (int i = 0; i < TOUCH_FILTER_SAMPLES; i++) {
+        s[i] = touchRead(TOUCH_SENSE_PIN);
+    }
+    // Insertion sort - the array is tiny
+    for (int i = 1; i < TOUCH_FILTER_SAMPLES; i++) {
+        uint32_t v = s[i];
+        int j = i - 1;
+        while (j >= 0 && s[j] > v) {
+            s[j + 1] = s[j];
+            j--;
+        }
+        s[j + 1] = v;
+    }
+    return s[TOUCH_FILTER_SAMPLES / 2];
 }
 
 void setupTouch()
 {
+    // Longer charge integration than the default for a better SNR; required
+    // for the low thresholds that battery-powered (floating-ground) touch needs
+    touchSetCycles(TOUCH_MEASURE_CYCLES, TOUCH_SLEEP_CYCLES);
+
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TOUCHPAD && touchBaseline > 0) {
         // Woken by the foil: keep the baseline stored in RTC memory and ignore
         // the touch still in progress so we don't immediately power off again.
@@ -291,13 +321,13 @@ void setupTouch()
         }
         touchBaseline = (uint32_t) (sum / TOUCH_BASELINE_SAMPLES);
     }
-    Serial.printf("Touch baseline: %lu, threshold: %lu\n", (unsigned long) touchBaseline,
-                  (unsigned long) touchThreshold());
+    Serial.printf("Touch baseline: %lu, on/off thresholds: %lu / %lu\n", (unsigned long) touchBaseline,
+                  (unsigned long) touchOnThreshold(), (unsigned long) touchOffThreshold());
 
     // Arm touch wake-up for light sleep: while BLE-connected the main loop can
     // sit in esp_light_sleep_start() for up to 15s and would never poll the
     // foil. A touch wakes the loop, which then times the 2s hold as usual.
-    touchAttachInterrupt(TOUCH_SENSE_PIN, touchWakeISR, (uint32_t) (touchBaseline * TOUCH_DELTA_RATIO));
+    touchAttachInterrupt(TOUCH_SENSE_PIN, touchWakeISR, (uint32_t) (touchBaseline * TOUCH_TOUCH_RATIO));
     esp_sleep_enable_touchpad_wakeup();
 }
 
@@ -307,20 +337,45 @@ void handleTouch()
     static unsigned long lastSampleTime = 0;
     static unsigned long touchStartTime = 0;
     static bool touchDown = false;
+    static bool touched = false;
+    static float baselineF = 0.0f;
 
     if (touchBaseline == 0 || now - lastSampleTime < TOUCH_SAMPLE_INTERVAL_MS) {
         return;
     }
     lastSampleTime = now;
+    if (baselineF == 0.0f) {
+        baselineF = (float) touchBaseline;
+    }
 
-    uint32_t raw = touchRead(TOUCH_SENSE_PIN);
-    bool touched = raw > touchThreshold();
+    uint32_t filtered = touchReadFiltered();
+
+    // Hysteresis: entering the touched state takes a higher value than leaving
+    // it, so readings hovering near a single threshold don't chatter.
+    if (!touched && filtered > touchOnThreshold()) {
+        touched = true;
+    } else if (touched && filtered < touchOffThreshold()) {
+        touched = false;
+    }
+
+    // While released, track drift (temperature / battery voltage / mounting)
+    // with a slow EMA so the relative thresholds stay valid. Frozen while
+    // touched, and asymmetric otherwise: upward movement is tracked 10x
+    // slower so a sub-threshold touch (the shrunken delta when running on
+    // battery with a floating ground) is not absorbed into the baseline.
+    if (!touched && !touchWaitRelease) {
+        float err = (float) filtered - baselineF;
+        baselineF += err * (err < 0 ? TOUCH_BASELINE_ALPHA : TOUCH_BASELINE_ALPHA_UP);
+        touchBaseline = (uint32_t) baselineF; // RTC copy also feeds the deep-sleep wake threshold
+    }
 
 #if TOUCH_DEBUG_LOG
     touchDebugLed = touched;
     static unsigned long lastLogTime = 0;
     if (now - lastLogTime >= 1000) {
-        Serial.printf("Touch raw: %lu (threshold: %lu)\n", (unsigned long) raw, (unsigned long) touchThreshold());
+        Serial.printf("Touch filtered: %lu baseline: %lu (on: %lu / off: %lu)\n", (unsigned long) filtered,
+                      (unsigned long) touchBaseline, (unsigned long) touchOnThreshold(),
+                      (unsigned long) touchOffThreshold());
         lastLogTime = now;
     }
 #endif
@@ -432,7 +487,7 @@ void shutdownDevice()
     esp_sleep_enable_ext1_wakeup(1ULL << POWER_BUTTON_PIN, ESP_EXT1_WAKEUP_ALL_LOW);
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
     // Wake when the foil's raw value rises this much above the sleep benchmark
-    touchSleepWakeUpEnable(TOUCH_SENSE_PIN, (uint32_t) (touchBaseline * TOUCH_DELTA_RATIO));
+    touchSleepWakeUpEnable(TOUCH_SENSE_PIN, (uint32_t) (touchBaseline * TOUCH_TOUCH_RATIO));
     Serial.println("Entering deep sleep...");
     delay(100);
     esp_deep_sleep_start();
