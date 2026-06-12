@@ -5,6 +5,7 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEUtils.h>
+#include <Preferences.h>
 
 #include "config.h" // Use config.h for all configurations
 #include "driver/rtc_io.h"
@@ -71,6 +72,7 @@ static BLEUUID syncStatusUUID(SYNC_STATUS_UUID);
 static BLEUUID syncControlUUID(SYNC_CONTROL_UUID);
 static BLEUUID syncDataUUID(SYNC_DATA_UUID);
 static BLEUUID timeSyncUUID(TIME_SYNC_UUID);
+static BLEUUID modeControlUUID(MODE_CONTROL_UUID);
 
 // OTA Service UUIDs
 static BLEUUID otaServiceUUID(OTA_SERVICE_UUID);
@@ -90,6 +92,7 @@ BLECharacteristic *syncStatusCharacteristic;
 BLECharacteristic *syncControlCharacteristic;
 BLECharacteristic *syncDataCharacteristic;
 BLECharacteristic *timeSyncCharacteristic;
+BLECharacteristic *modeControlCharacteristic;
 
 // Audio state
 bool audioEnabled = true;
@@ -106,6 +109,14 @@ bool connected = false;
 bool isCapturingPhotos = false;
 int captureInterval = 0; // Interval in ms
 unsigned long lastCaptureTime = 0;
+
+// Capture mode (CAPTURE_MODE_LOCAL / CAPTURE_MODE_STREAMING, see config.h).
+// Holds the *effective* mode: a LOCAL request without a mounted card resolves
+// to STREAMING. The requested mode is persisted in NVS and re-resolved at boot.
+// BLE writes only set the request flags; the NVS write happens in loop_app.
+volatile uint8_t captureMode = CAPTURE_MODE_LOCAL;
+static volatile bool modeChangeRequested = false;
+static volatile uint8_t requestedMode = 0;
 
 // Audio ring buffer for encoded packets
 #define AUDIO_TX_BUFFER_SIZE (AUDIO_TX_RING_BUFFER_SIZE * (OPUS_OUTPUT_MAX_BYTES + 2))
@@ -184,6 +195,10 @@ void processAudioTx();
 // Sync forward declarations
 void updateSyncStatus(bool notifyApp);
 void processSync(unsigned long now);
+
+// Capture mode forward declarations
+void applyCaptureMode(uint8_t mode);
+void publishCaptureMode(bool notifyApp);
 
 // -------------------------------------------------------------------------
 // Button ISR
@@ -570,6 +585,66 @@ void shutdownDevice()
 }
 
 // -------------------------------------------------------------------------
+// Capture Mode (LOCAL = SD-first, STREAMING = BLE live with SD fallback)
+// -------------------------------------------------------------------------
+static uint8_t loadPersistedMode()
+{
+    Preferences prefs;
+    if (!prefs.begin("envsense", true)) {
+        return 0; // Namespace doesn't exist yet (first boot)
+    }
+    uint8_t mode = prefs.getUChar("mode", 0);
+    prefs.end();
+    return mode;
+}
+
+static void persistMode(uint8_t mode)
+{
+    Preferences prefs;
+    if (prefs.begin("envsense", false)) {
+        prefs.putUChar("mode", mode);
+        prefs.end();
+    }
+}
+
+// Mirror the effective mode into the characteristic so reads and (on change)
+// notifications always reflect what the device is actually doing.
+void publishCaptureMode(bool notifyApp)
+{
+    if (modeControlCharacteristic == nullptr) {
+        return;
+    }
+    uint8_t value = captureMode;
+    modeControlCharacteristic->setValue(&value, 1);
+    if (notifyApp && connected) {
+        modeControlCharacteristic->notify();
+    }
+}
+
+// Resolve and switch to a capture mode. LOCAL needs the card: without one the
+// device keeps running in STREAMING, and the publish below tells the app the
+// effective mode (its request is still persisted, so inserting a card and
+// rebooting honors it).
+void applyCaptureMode(uint8_t mode)
+{
+    if (mode == CAPTURE_MODE_LOCAL && !storage_available()) {
+        mode = CAPTURE_MODE_STREAMING;
+    }
+    if (mode == CAPTURE_MODE_STREAMING && connected) {
+        // Stop recording the open utterance to the SD; speech from here on
+        // goes out live. Closed by the audio task after the trailing frames.
+        utteranceEndPending = true;
+    }
+    captureMode = mode;
+    // Live photo upload follows the mode; the app can still override it per
+    // connection through PHOTO_CONTROL (stop / single shot).
+    isCapturingPhotos = (mode == CAPTURE_MODE_STREAMING);
+    captureInterval = PHOTO_CAPTURE_INTERVAL_MS;
+    publishCaptureMode(true);
+    Serial.printf("Capture mode: %s\n", mode == CAPTURE_MODE_LOCAL ? "local" : "streaming");
+}
+
+// -------------------------------------------------------------------------
 // Audio Functions
 // -------------------------------------------------------------------------
 void onMicData(int16_t *data, size_t samples)
@@ -588,6 +663,14 @@ void onVoicedPcm(int16_t *data, size_t samples)
 void onVadStateChange(bool speaking)
 {
     if (speaking) {
+        // LOCAL records every utterance to the SD. STREAMING sends speech live
+        // instead and only records to the SD while disconnected (out-of-range
+        // fallback); an utterance straddling a reconnect keeps writing to its
+        // file until it ends.
+        bool recordToSd = storage_available() && (captureMode == CAPTURE_MODE_LOCAL || !connected);
+        if (!recordToSd) {
+            return;
+        }
         uint64_t now = storage_now_ms();
         uint64_t start = now > VAD_PREROLL_MS ? now - VAD_PREROLL_MS : now;
         storage_audio_begin_utterance(start);
@@ -603,13 +686,14 @@ void onOpusEncoded(uint8_t *data, size_t len)
         return;
     }
 
-    // SD-first: every encoded frame lands in the current utterance file. The
-    // BLE TX ring below is the legacy live stream, still served when an app
-    // explicitly subscribes (debug / no-SD fallback).
+    // Frames land in the current utterance file when one is open (LOCAL mode,
+    // or the STREAMING out-of-range fallback; see onVadStateChange). The BLE
+    // TX ring below is the live stream, served in STREAMING mode to an app
+    // that subscribed.
     if (storage_audio_utterance_open()) {
         storage_audio_write_frame(data, (uint16_t) len);
     }
-    if (!connected || !audioSubscribed) {
+    if (captureMode != CAPTURE_MODE_STREAMING || !connected || !audioSubscribed) {
         return;
     }
 
@@ -750,9 +834,10 @@ class ServerHandler : public BLEServerCallbacks
         audioSubscribed = false;
         lastActivity = millis(); // Register activity - prevents sleep
         Serial.println(">>> BLE Client connected.");
-        // Send current battery level and unsynced stats on connect
+        // Send current battery level, unsynced stats and capture mode on connect
         updateBatteryService();
         updateSyncStatus(true);
+        publishCaptureMode(true);
     }
     void onDisconnect(BLEServer *server) override
     {
@@ -816,6 +901,21 @@ class PhotoControlCallback : public BLECharacteristicCallbacks
             Serial.println(received);
             lastActivity = millis(); // Register activity - prevents sleep
             handlePhotoControl(received);
+        }
+    }
+};
+
+class ModeControlCallback : public BLECharacteristicCallbacks
+{
+    void onWrite(BLECharacteristic *characteristic) override
+    {
+        if (characteristic->getLength() == 1) {
+            uint8_t mode = characteristic->getData()[0];
+            Serial.printf("ModeControl received: 0x%02X\n", mode);
+            lastActivity = millis();
+            // Applied in loop_app: the NVS write is too slow for a BLE callback
+            requestedMode = mode;
+            modeChangeRequested = true;
         }
     }
 };
@@ -1255,6 +1355,19 @@ void configure_ble()
     timeSyncCharacteristic = service->createCharacteristic(timeSyncUUID, BLECharacteristic::PROPERTY_WRITE);
     timeSyncCharacteristic->setCallbacks(new TimeSyncCallback());
 
+    // Capture Mode characteristic (LOCAL / STREAMING switch from the app).
+    // The real initial value is published in setup_app once the SD state is
+    // known (configure_ble runs before storage_init).
+    modeControlCharacteristic = service->createCharacteristic(
+        modeControlUUID,
+        BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
+    BLE2902 *modeCcc = new BLE2902();
+    modeCcc->setNotifications(true);
+    modeControlCharacteristic->addDescriptor(modeCcc);
+    modeControlCharacteristic->setCallbacks(new ModeControlCallback());
+    uint8_t initialMode = captureMode;
+    modeControlCharacteristic->setValue(&initialMode, 1);
+
     updateSyncStatus(false);
 
     // Battery Service
@@ -1479,13 +1592,14 @@ void setup_app()
         Serial.println("Chunk buffer allocated successfully.");
     }
 
-    // Set default capture interval from config. isCapturingPhotos now means
-    // "live BLE upload requested": with SD storage the interval capture runs
-    // unconditionally and live upload stays off until the app writes
-    // PHOTO_CONTROL; without SD the legacy default (stream when connected)
-    // is kept.
-    isCapturingPhotos = !storage_available();
-    captureInterval = PHOTO_CAPTURE_INTERVAL_MS;
+    // Restore the persisted capture mode now that the SD state is known. The
+    // first boot (nothing persisted) defaults to LOCAL when a card is present,
+    // matching the previous SD-first behavior, and STREAMING otherwise.
+    uint8_t savedMode = loadPersistedMode();
+    if (savedMode != CAPTURE_MODE_LOCAL && savedMode != CAPTURE_MODE_STREAMING) {
+        savedMode = storage_available() ? CAPTURE_MODE_LOCAL : CAPTURE_MODE_STREAMING;
+    }
+    applyCaptureMode(savedMode);
     lastCaptureTime = millis() - captureInterval;
     Serial.print("Default capture interval set to ");
     Serial.print(PHOTO_CAPTURE_INTERVAL_MS / 1000);
@@ -1566,6 +1680,18 @@ void loop_app()
     }
 #endif
 
+    // Apply a capture-mode write (deferred from ModeControlCallback). The raw
+    // request is persisted as the user's intent; applyCaptureMode resolves it
+    // against SD availability and notifies the effective mode back.
+    if (modeChangeRequested) {
+        modeChangeRequested = false;
+        uint8_t mode = requestedMode;
+        if (mode == CAPTURE_MODE_LOCAL || mode == CAPTURE_MODE_STREAMING) {
+            persistMode(mode);
+            applyCaptureMode(mode);
+        }
+    }
+
     // Process OTA updates
     ota_loop();
 
@@ -1617,17 +1743,20 @@ void loop_app()
         firstBatteryUpdate = false;
     }
 
-    // Check if it's time to capture a photo.
-    // SD-first: with a card mounted, photos are captured on the fixed interval
-    // regardless of the BLE connection and saved to the card; the app pulls
-    // them later via the sync protocol. The legacy live upload only runs when
-    // the app explicitly asked for it via PHOTO_CONTROL (isCapturingPhotos),
-    // which is also the no-SD fallback path.
+    // Check if it's time to capture a photo, by mode:
+    //   LOCAL                    -> save to the SD on the fixed interval,
+    //                               connection-independent (live upload only on
+    //                               an explicit PHOTO_CONTROL request)
+    //   STREAMING + connected    -> live upload only (isCapturingPhotos, set by
+    //                               the mode switch / PHOTO_CONTROL)
+    //   STREAMING + disconnected -> fall back to the SD so the time out of
+    //                               range is still captured (synced later)
     bool singleShot = isCapturingPhotos && captureInterval == 0;
     bool photoDue = singleShot || (now - lastCaptureTime >= (unsigned long) captureInterval);
-    bool wantPhoto = storage_available() ? true : (isCapturingPhotos && connected);
+    bool sdSave = storage_available() && (captureMode == CAPTURE_MODE_LOCAL || !connected);
+    bool wantLiveUpload = isCapturingPhotos && connected;
+    bool wantPhoto = sdSave || wantLiveUpload;
     if (wantPhoto && !photoDataUploading && photoDue) {
-        bool wantLiveUpload = isCapturingPhotos && connected;
         if (singleShot) {
             isCapturingPhotos = false;
             if (storage_available()) {
@@ -1637,7 +1766,7 @@ void loop_app()
         Serial.println("Interval reached. Capturing photo...");
         if (take_photo()) {
             lastCaptureTime = now;
-            if (storage_available()) {
+            if (sdSave) {
                 storage_save_photo(fb->buf, fb->len, (uint8_t) current_photo_orientation);
             }
             if (wantLiveUpload) {

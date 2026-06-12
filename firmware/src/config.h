@@ -12,7 +12,7 @@
 // DEVICE CONFIGURATION
 // =============================================================================
 #define BLE_DEVICE_NAME "envsense"
-#define FIRMWARE_VERSION_STRING "2.5.0"
+#define FIRMWARE_VERSION_STRING "2.6.0"
 #define HARDWARE_REVISION "ESP32-S3-v1.0"
 #define MANUFACTURER_NAME "envsense"
 
@@ -208,10 +208,20 @@ typedef enum {
 #define SYNC_CONTROL_UUID "EA800009-9C72-497F-81F9-752FFE11F565"
 #define SYNC_DATA_UUID "EA80000A-9C72-497F-81F9-752FFE11F565"
 #define TIME_SYNC_UUID "EA80000B-9C72-497F-81F9-752FFE11F565"
+#define MODE_CONTROL_UUID "EA80000C-9C72-497F-81F9-752FFE11F565"
 
 // Power commands (written to POWER_CONTROL_UUID)
 #define POWER_CMD_SLEEP 0x01  // Enter deep sleep (same as touch / button long press)
 #define POWER_CMD_REBOOT 0x02 // Restart the device
+
+// Capture modes (MODE_CONTROL, read/write/notify; 1 byte). Persisted in NVS.
+// LOCAL records photos + VAD audio to the microSD only (pulled later via the
+// sync protocol). STREAMING sends them live over PHOTO_DATA / AUDIO_DATA while
+// connected and falls back to the SD while out of range so nothing is lost.
+// A LOCAL request without a mounted card is rejected: the device keeps running
+// in STREAMING and notifies the effective mode back to the app.
+#define CAPTURE_MODE_LOCAL 0x01
+#define CAPTURE_MODE_STREAMING 0x02
 
 // -----------------------------------------------------------------------------
 // Sync protocol (microSD -> app bulk transfer). All integers little-endian.
