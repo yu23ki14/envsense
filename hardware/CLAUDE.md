@@ -96,9 +96,11 @@ measured) — 0.6 mm past the cavity head wall's inner face. The card's z/y enve
   channel in the TOP's head wall, open down to the mating face (z=0)** and blind in X. The
   open-bottom is what makes closing possible: the channel *is* the card nose's descent column, so
   the lid drops around the inserted card (an X-blind pocket alone would collide during the close).
-  Its front face is coplanar with the USB counterbore floor (x=-3.1) to avoid a 0.1 mm wafer
-  against the well — the channel joins the well's upper region (card nose visible down the well,
-  but a plug's overmold stops at the well floor and never reaches it). Card swap = open the case.
+  Its front face sits `sd_clr_x` (1.0) past the USB counterbore floor (x=-4.1; was coplanar at
+  -3.1 with only 0.6 mm to the card nose — the printed unit's card hit the wall, widened 2026-06).
+  Deeper than the well floor leaves a 1 mm step, not the 0.1 mm wafer that a *shallower* face
+  would — the channel joins the well's upper region (card nose visible down the well, but a
+  plug's overmold stops at the well floor and never reaches it). Card swap = open the case.
   The cut is applied **only in `pebble_enclosure_top()`**, not in `pebble_shell_solid()` — the
   bottom shares the shell solid and would otherwise get a 0.1 mm bite out of its rim first layer.
 

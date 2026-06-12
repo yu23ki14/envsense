@@ -110,7 +110,7 @@ module corner_grip(bx, by, top_h, do_edgeB = true) {
     yo = (sy == 1) ? cav_y0 : cav_y1;   // 壁側 y
     z0 = z_board_bot - shelf_t;                       // 棚の底
     // 押さえの天（下面を board_top_gap 上げた分、天も上げて爪厚 top_h を維持）。
-    // 爪なし(top_h=0)の後隅は z=0（分割面）で止める: board_top_gap を足すと 0.5mm だけ
+    // 爪なし(top_h=0)の後隅は z=0（分割面）で止める: board_top_gap を足すとその分だけ
     // top 側にはみ出し、印籠溝に溶着を切られた浮島が top の合わせ面に印刷されてしまう。
     z1 = (top_h > 0) ? z_board_top + board_top_gap + top_h : z_board_top;
     difference() {
