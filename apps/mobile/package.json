@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@expo-google-fonts/noto-sans-jp": "^0.4.3",
+    "@notifee/react-native": "^9.1.8",
     "date-fns": "^4.4.0",
     "expo": "~55.0.25",
     "expo-audio": "~55.0.14",
@@ -34,8 +35,8 @@
     "react-native-audio-api": "^0.12.2",
     "react-native-ble-plx": "^3.5.0",
     "react-native-edge-to-edge": "^1.8.1",
-    "react-native-mmkv": "^4.3.1",
     "react-native-litert-lm": "^0.4.2",
+    "react-native-mmkv": "^4.3.1",
     "react-native-nitro-modules": "^0.35.9",
     "react-native-quick-base64": "^2.2.0",
     "react-native-safe-area-context": "~5.6.2",

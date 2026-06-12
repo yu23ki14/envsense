@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import { ModelRef } from './common';
 
+// 撮影間隔はファームウェア固定（modules/useDeviceCapture の CAPTURE_INTERVAL_SEC を参照）の
+// ため設定には持たない。旧データの intervalSec キーは zod が parse 時に黙って捨てる。
 export const CaptureSettings = z.object({
-  intervalSec: z.number().int().positive(),
   resolution: z.enum(['VGA', 'SVGA']),
   privateMode: z.boolean(),
 });
@@ -71,7 +72,6 @@ export type Settings = z.infer<typeof Settings>;
 export const DEFAULT_SETTINGS: Settings = {
   schemaVersion: 1,
   capture: {
-    intervalSec: 5,
     resolution: 'VGA',
     privateMode: false,
   },

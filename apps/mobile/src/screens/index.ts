@@ -4,6 +4,7 @@
 export { DeviceScreen } from './DeviceScreen';
 export { ExportScreen } from './ExportScreen';
 export { JournalScreen } from './JournalScreen';
+export { PhotoGalleryScreen } from './PhotoGalleryScreen';
 export { RecordScreen } from './RecordScreen';
 export { TodayScreen } from './TodayScreen';
 export { TranscriptScreen } from './TranscriptScreen';

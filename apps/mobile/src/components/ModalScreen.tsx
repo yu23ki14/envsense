@@ -19,10 +19,19 @@ export type ModalScreenProps = {
   headerRight?: ReactNode;
   /** 戻る挙動。既定は router.back()。 */
   onClose?: () => void;
+  /** 本文を ScrollView で包むか。FlatList 等を子に持つ画面は false にする。既定 true。 */
+  scrollable?: boolean;
   children: ReactNode;
 };
 
-export function ModalScreen({ title, subtitle, headerRight, onClose, children }: ModalScreenProps) {
+export function ModalScreen({
+  title,
+  subtitle,
+  headerRight,
+  onClose,
+  scrollable = true,
+  children,
+}: ModalScreenProps) {
   const insets = useSafeAreaInsets();
 
   return (
@@ -48,7 +57,11 @@ export function ModalScreen({ title, subtitle, headerRight, onClose, children }:
         </View>
         <View style={styles.headerRight}>{headerRight}</View>
       </View>
-      <ScrollView contentContainerStyle={styles.content}>{children}</ScrollView>
+      {scrollable ? (
+        <ScrollView contentContainerStyle={styles.content}>{children}</ScrollView>
+      ) : (
+        <View style={styles.body}>{children}</View>
+      )}
     </View>
   );
 }
@@ -81,5 +94,8 @@ const styles = StyleSheet.create((theme) => ({
   content: {
     flexGrow: 1,
     paddingBottom: theme.spacing.xxl,
+  },
+  body: {
+    flex: 1,
   },
 }));

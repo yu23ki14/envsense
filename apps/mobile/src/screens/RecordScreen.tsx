@@ -22,6 +22,7 @@ import {
 } from '../components';
 import type { Day } from '../data';
 import { getPhoto, useDaysList } from '../data';
+import { useDeviceStatusChip } from '../modules/DeviceProvider';
 import { Icon, Text, TextField } from '../ui';
 
 type Range = 'week' | 'month' | 'all';
@@ -75,6 +76,7 @@ export function RecordScreen() {
   const [query, setQuery] = useState('');
   const [range, setRange] = useState<Range>('week');
   const days = useDaysList();
+  const statusChip = useDeviceStatusChip();
 
   const now = useMemo(() => new Date(), []);
   const filtered = useMemo(
@@ -83,7 +85,7 @@ export function RecordScreen() {
   );
 
   return (
-    <ClipScreen>
+    <ClipScreen status={statusChip}>
       <View style={styles.flow}>
         <View style={styles.header}>
           <Text variant="heading2">記録</Text>

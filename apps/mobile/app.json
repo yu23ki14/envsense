@@ -27,7 +27,10 @@
         "android.permission.BLUETOOTH_ADMIN",
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_CONNECT",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -62,7 +65,8 @@
           "disableFFmpeg": true
         }
       ],
-      "react-native-litert-lm"
+      "react-native-litert-lm",
+      "./plugins/withNotifeeConnectedDevice.js"
     ],
     "extra": {
       "eas": {

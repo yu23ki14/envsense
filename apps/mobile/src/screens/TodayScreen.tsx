@@ -9,7 +9,7 @@ import { format } from 'date-fns';
 import { ja } from 'date-fns/locale/ja';
 import { router } from 'expo-router';
 import { useMemo } from 'react';
-import { View } from 'react-native';
+import { Pressable, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { Card, ClipPhoto, ClipScreen, SectionHeader, Tag } from '../components';
 import type { Highlight, Photo } from '../data';
@@ -20,6 +20,8 @@ import {
   useHighlightsForDay,
   usePhotosForDay,
 } from '../data';
+import { useDeviceStatusChip } from '../modules/DeviceProvider';
+import { CAPTURE_INTERVAL_SEC } from '../modules/useDeviceCapture';
 import { Button, Icon, Text } from '../ui';
 
 const SNAPSHOT_LIMIT = 4;
@@ -48,6 +50,7 @@ export function TodayScreen() {
   const photos = usePhotosForDay(todayKey);
   const highlights = useHighlightsForDay(todayKey);
   const audioTotalMs = useAudioTotalMsForDay(todayKey);
+  const statusChip = useDeviceStatusChip();
 
   const snapshots = useMemo<Photo[]>(() => pickEvenlySpaced(photos, SNAPSHOT_LIMIT), [photos]);
   const recentHighlights = useMemo<Highlight[]>(
@@ -60,7 +63,7 @@ export function TodayScreen() {
   const audioLabel = audioTotalMs > 0 ? formatDurationFromMs(audioTotalMs) : '0:00';
 
   return (
-    <ClipScreen>
+    <ClipScreen status={statusChip}>
       <View style={styles.flow}>
         <View style={styles.intro}>
           <Text variant="caption" color="textMuted">
@@ -81,14 +84,37 @@ export function TodayScreen() {
           </Card>
         </View>
 
-        <SectionHeader kicker="スナップショット" title="今日の眺め" />
+        <SectionHeader
+          kicker="スナップショット"
+          title="今日の眺め"
+          action={
+            photos.length > 0 ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => router.push({ pathname: '/photos', params: { date: todayKey } })}
+              >
+                <Text variant="caption" color="link">
+                  すべて見る
+                </Text>
+              </Pressable>
+            ) : null
+          }
+        />
         <View style={styles.gutter}>
           {snapshots.length === 0 ? (
-            <EmptyHint message="まだ写真がありません。デバイスを接続すると 5 秒ごとに自動で撮影されます。" />
+            <EmptyHint
+              message={`まだ写真がありません。デバイスを接続すると ${CAPTURE_INTERVAL_SEC} 秒ごとに自動で撮影されます。`}
+            />
           ) : (
             <View style={styles.grid}>
               {snapshots.map((shot) => (
-                <View key={shot.id} style={styles.gridItem}>
+                <Pressable
+                  key={shot.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${formatClock(shot.capturedAt)} の写真。タップで全 ${photoCount} 枚を見る`}
+                  onPress={() => router.push({ pathname: '/photos', params: { date: todayKey } })}
+                  style={styles.gridItem}
+                >
                   <ClipPhoto photo={shot} radius={12} />
                   <View style={styles.gridCaption}>
                     <Text variant="caption" weight="bold">
@@ -98,7 +124,7 @@ export function TodayScreen() {
                       {shot.description ?? '—'}
                     </Text>
                   </View>
-                </View>
+                </Pressable>
               ))}
             </View>
           )}

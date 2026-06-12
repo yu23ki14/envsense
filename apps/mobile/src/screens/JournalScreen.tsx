@@ -8,7 +8,7 @@ import { differenceInCalendarDays, format, parseISO } from 'date-fns';
 import { ja } from 'date-fns/locale/ja';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useMemo } from 'react';
-import { View } from 'react-native';
+import { Pressable, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { Card, ClipPhoto, DaySummarySection, ModalScreen, SectionHeader, Tag } from '../components';
 import { dateKey, useDay, useHighlightsForDay, usePhotosForDay, useTimelineForDay } from '../data';
@@ -99,7 +99,22 @@ export function JournalScreen() {
           <DaySummarySection date={resolvedDate} />
         </View>
 
-        <SectionHeader kicker="写真" title="その日の眺め" />
+        <SectionHeader
+          kicker="写真"
+          title="その日の眺め"
+          action={
+            photoCount > 0 ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={() => router.push({ pathname: '/photos', params: { date: resolvedDate } })}
+              >
+                <Text variant="caption" color="link">
+                  すべて見る
+                </Text>
+              </Pressable>
+            ) : null
+          }
+        />
         <View style={styles.gutter}>
           {gridPhotos.length === 0 ? (
             <Card tone="soft" padding="md">
@@ -110,9 +125,17 @@ export function JournalScreen() {
           ) : (
             <View style={styles.grid}>
               {gridPhotos.map((p) => (
-                <View key={p.id} style={styles.gridItem}>
+                <Pressable
+                  key={p.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${formatClock(p.capturedAt)} の写真。タップで全 ${photoCount} 枚を見る`}
+                  onPress={() =>
+                    router.push({ pathname: '/photos', params: { date: resolvedDate } })
+                  }
+                  style={styles.gridItem}
+                >
                   <ClipPhoto photo={p} radius={10} />
-                </View>
+                </Pressable>
               ))}
             </View>
           )}
