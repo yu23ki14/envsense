@@ -20,6 +20,7 @@ import {
 } from '../components';
 import { secrets, updateSettings, usePairedDevice, useSettings } from '../data';
 import { useDeviceContext } from '../modules/DeviceProvider';
+import type { CaptureMode } from '../modules/deviceMode';
 import { rebootDevice, sleepDevice } from '../modules/devicePower';
 import {
   localModelIdOf,
@@ -50,6 +51,23 @@ const SUMMARY_OPTIONS: SettingSelectOption<string>[] = SUMMARY_MODELS.map((m) =>
   note: m.note,
   group: KIND_GROUP[m.kind],
 }));
+
+const CAPTURE_MODE_OPTIONS: SettingSelectOption<CaptureMode>[] = [
+  {
+    value: 'local',
+    label: 'ローカル保存',
+    note: 'SD カードに記録し、あとからまとめて同期する（バッテリー長持ち）',
+  },
+  {
+    value: 'streaming',
+    label: 'ストリーミング',
+    note: '接続中はアプリへ即時転送。圏外の間は SD カードに記録して後で同期',
+  },
+];
+
+function captureModeLabel(mode: CaptureMode): string {
+  return mode === 'local' ? 'ローカル保存' : 'ストリーミング';
+}
 
 const LANGUAGE_OPTIONS: SettingSelectOption<string>[] = [
   { value: 'ja', label: '日本語' },
@@ -85,7 +103,8 @@ function formatBytes(bytes: number): string {
 export function DeviceScreen() {
   const settings = useSettings();
   const paired = usePairedDevice();
-  const { device: liveDevice, status, sync, connect, disconnect } = useDeviceContext();
+  const { device: liveDevice, status, sync, mode, connect, disconnect } = useDeviceContext();
+  const [captureModeModalOpen, setCaptureModeModalOpen] = useState(false);
   const [transcriptionModalOpen, setTranscriptionModalOpen] = useState(false);
   const [summaryModalOpen, setSummaryModalOpen] = useState(false);
   const [languageModalOpen, setLanguageModalOpen] = useState(false);
@@ -104,10 +123,24 @@ export function DeviceScreen() {
   else if (status.isConnecting) statusTitle = '接続要求中';
 
   const statusDesc = isLive
-    ? `${CAPTURE_INTERVAL_SEC} 秒ごとに撮影しています`
+    ? mode.deviceMode === 'streaming'
+      ? `ストリーミング中 · ${CAPTURE_INTERVAL_SEC} 秒ごとに撮影`
+      : `${CAPTURE_INTERVAL_SEC} 秒ごとに撮影しています`
     : paired != null
       ? 'デバイスが範囲外か電源オフです'
       : 'デバイスをペアリングしてください';
+
+  // 設定（ユーザーの意図）とデバイスの実効モードの食い違いを説明する。
+  let captureModeDesc = 'ローカル保存とストリーミングを切り替える';
+  if (isLive && !mode.supported) {
+    captureModeDesc = 'このファームウェアはモード切替に未対応です';
+  } else if (
+    isLive &&
+    settings.capture.captureMode === 'local' &&
+    mode.deviceMode === 'streaming'
+  ) {
+    captureModeDesc = 'SD カードが見つからないためストリーミングで動作中';
+  }
 
   const batteryLabel = paired?.lastBatteryPercent != null ? `${paired.lastBatteryPercent}%` : '—';
   const rssiLabel = paired?.lastRssi != null ? `${paired.lastRssi} dBm` : '—';
@@ -240,6 +273,19 @@ export function DeviceScreen() {
                 </Button>
               )}
             </View>
+          </Card>
+        </View>
+
+        <SectionHeader kicker="動作" title="キャプチャモード" />
+        <View style={styles.gutter}>
+          <Card padding="none">
+            <ListRow
+              icon="filter"
+              title="モード"
+              description={captureModeDesc}
+              value={captureModeLabel(settings.capture.captureMode)}
+              onPress={() => setCaptureModeModalOpen(true)}
+            />
           </Card>
         </View>
 
@@ -405,6 +451,17 @@ export function DeviceScreen() {
           </Button>
         </View>
       </View>
+
+      <SettingSelectModal
+        visible={captureModeModalOpen}
+        title="キャプチャモード"
+        options={CAPTURE_MODE_OPTIONS}
+        value={settings.capture.captureMode}
+        onSelect={(m) => {
+          void mode.setMode(m);
+        }}
+        onClose={() => setCaptureModeModalOpen(false)}
+      />
 
       <SettingSelectModal
         visible={transcriptionModalOpen}

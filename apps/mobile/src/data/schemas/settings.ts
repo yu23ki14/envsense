@@ -6,6 +6,10 @@ import { ModelRef } from './common';
 export const CaptureSettings = z.object({
   resolution: z.enum(['VGA', 'SVGA']),
   privateMode: z.boolean(),
+  // キャプチャモード（ユーザーの意図）。'local' は SD カードへ記録して後で同期、
+  // 'streaming' は接続中 BLE で即時転送（圏外中は SD へフォールバック）。接続のたびに
+  // デバイスへ書き込む（modules/useDeviceMode）。`.default` で旧データもマイグレーション不要。
+  captureMode: z.enum(['local', 'streaming']).default('local'),
 });
 export type CaptureSettings = z.infer<typeof CaptureSettings>;
 
@@ -74,6 +78,7 @@ export const DEFAULT_SETTINGS: Settings = {
   capture: {
     resolution: 'VGA',
     privateMode: false,
+    captureMode: 'local',
   },
   audio: {
     autoRecord: true,

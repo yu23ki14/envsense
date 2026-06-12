@@ -1,18 +1,20 @@
 /**
  * 接続中デバイスの常時購読。
  *
- * SDファースト運用（firmware 2.5.0+ で microSD が刺さっている場合）では、
- * メディアは接続の有無に関わらずデバイスの SD に貯まり、転送は同期プロトコル
- * （deviceSync / useDeviceSync）がユーザー操作で行う。このフックの仕事は
- * バッテリー購読だけになる。
- *
- * SYNC_STATUS が読めない（旧ファームウェア）か SD が無い場合は、従来どおり
- * BLE ライブストリーミングで写真と音声を受信するフォールバック経路を張る。
+ * ライブストリーミング経路を張るかはキャプチャモード（useDeviceMode が保持する
+ * デバイスの実効モード）で決まる:
+ * - 'local': メディアは接続の有無に関わらずデバイスの SD に貯まり、転送は同期
+ *   プロトコル（deviceSync / useDeviceSync）がユーザー操作で行う。このフックの
+ *   仕事はバッテリー購読だけになる。
+ * - 'streaming': 写真と音声を BLE ライブストリーミングで受信する。
+ * - null（モード未取得 = 旧ファームウェア）: 従来どおり SYNC_STATUS の SD 有無で
+ *   自動判定する（SD ありなら同期運用、無し / 読めないならライブ）。
  * 保存パイプラインは同期側と共通の mediaIngest にある。
  */
 import { useEffect } from 'react';
 import { getPairedDevice, savePairedDevice } from '../data';
 import type { BleDevice } from './ble';
+import type { CaptureMode } from './deviceMode';
 import { parseSyncStatus, SYNC_STATUS_UUID } from './deviceSync';
 import {
   AudioSessionIngestor,
@@ -64,7 +66,7 @@ async function isSdFirstDevice(device: BleDevice): Promise<boolean> {
   }
 }
 
-export function useDeviceCapture(device: BleDevice | null): void {
+export function useDeviceCapture(device: BleDevice | null, mode: CaptureMode | null): void {
   useEffect(() => {
     if (device == null) return;
     let cancelled = false;
@@ -102,16 +104,15 @@ export function useDeviceCapture(device: BleDevice | null): void {
         console.warn('Could not read battery characteristic', err);
       }
 
-      // --- SD ファースト判定 --------------------------------------------------
-      if (await isSdFirstDevice(device)) {
-        // メディアはデバイスの SD に貯まる。転送は useDeviceSync の同期操作で
-        // 行うので、ここではライブストリーミングを張らない（張らないことが
-        // ファームウェア側の送信抑制も兼ねる: 音声は購読が、写真は
-        // PHOTO_CONTROL への書き込みがトリガー）。
-        return;
-      }
+      // --- ライブストリーミングを張るかの判定 ---------------------------------
+      // 'local' は同期運用なのでバッテリー購読だけで終わる。モード未取得
+      // （旧ファームウェア）は従来の SD 有無による自動判定にフォールバック。
+      // 張らないことがファームウェア側の送信抑制も兼ねる（音声は購読が、
+      // 写真は PHOTO_CONTROL への書き込みがトリガー）。
+      if (mode === 'local') return;
+      if (mode == null && (await isSdFirstDevice(device))) return;
 
-      // --- 以降は SD 無し / 旧ファームのライブストリーミングフォールバック ----
+      // --- 以降は 'streaming'（または旧ファームの SD 無し）のライブ経路 -------
 
       // --- Photo pipeline ---------------------------------------------------
       let previousChunk = -1;
@@ -216,5 +217,5 @@ export function useDeviceCapture(device: BleDevice | null): void {
       unsubBattery?.();
       ingestor?.flush().catch(() => undefined);
     };
-  }, [device]);
+  }, [device, mode]);
 }

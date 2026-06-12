@@ -9,12 +9,14 @@ import type { BleDevice } from './ble';
 import { useDeviceKeepAlive } from './keepAlive';
 import { type DeviceStatus, useDevice } from './useDevice';
 import { useDeviceCapture } from './useDeviceCapture';
+import { type DeviceModeState, useDeviceMode } from './useDeviceMode';
 import { type DeviceSyncState, useDeviceSync } from './useDeviceSync';
 
 type DeviceContextValue = {
   device: BleDevice | null;
   status: DeviceStatus;
   sync: DeviceSyncState;
+  mode: DeviceModeState;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
 };
@@ -23,12 +25,15 @@ const DeviceContext = createContext<DeviceContextValue | null>(null);
 
 export function DeviceProvider({ children }: { children: ReactNode }) {
   const [device, connect, disconnect, status] = useDevice();
-  useDeviceCapture(device);
+  const mode = useDeviceMode(device);
+  // ライブストリーミング経路はデバイスの実効モードに追従する（'local' へ切り替えると
+  // 購読が解除され、'streaming' へ戻すと張り直される）。
+  useDeviceCapture(device, mode.deviceMode);
   useDeviceKeepAlive(device != null);
   const sync = useDeviceSync(device);
   const value = useMemo<DeviceContextValue>(
-    () => ({ device, status, sync, connect, disconnect }),
-    [device, status, sync, connect, disconnect],
+    () => ({ device, status, sync, mode, connect, disconnect }),
+    [device, status, sync, mode, connect, disconnect],
   );
   return <DeviceContext.Provider value={value}>{children}</DeviceContext.Provider>;
 }
