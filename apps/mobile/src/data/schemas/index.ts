@@ -5,6 +5,7 @@ export * from './day';
 export * from './daySummary';
 export * from './highlight';
 export * from './pairedDevice';
+export * from './pendingTranscription';
 export * from './photo';
 export * from './settings';
 export * from './timelineEvent';

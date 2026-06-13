@@ -3,10 +3,11 @@
  * 取得した写真 / 音声は MMKV repo に逐次書き込まれる。
  * microSD 同期（未同期状況・手動同期の実行）もここで一元管理する。
  */
-import { createContext, type ReactNode, useContext, useMemo } from 'react';
+import { createContext, type ReactNode, useContext, useEffect, useMemo } from 'react';
 import { usePairedDevice } from '../data';
 import type { BleDevice } from './ble';
 import { useDeviceKeepAlive } from './keepAlive';
+import { resumePendingTranscriptions } from './transcriptionBacklog';
 import { type DeviceStatus, useDevice } from './useDevice';
 import { useDeviceCapture } from './useDeviceCapture';
 import { type DeviceModeState, useDeviceMode } from './useDeviceMode';
@@ -31,6 +32,10 @@ export function DeviceProvider({ children }: { children: ReactNode }) {
   useDeviceCapture(device, mode.deviceMode);
   useDeviceKeepAlive(device != null);
   const sync = useDeviceSync(device);
+  // 前回中断（アプリ kill・API 失敗）した文字起こしを起動時に自動再開する。
+  useEffect(() => {
+    void resumePendingTranscriptions();
+  }, []);
   const value = useMemo<DeviceContextValue>(
     () => ({ device, status, sync, mode, connect, disconnect }),
     [device, status, sync, mode, connect, disconnect],

@@ -18,6 +18,8 @@ import {
   DEFAULT_SETTINGS,
   type Highlight,
   PairedDevice,
+  type PendingTranscription,
+  PendingTranscriptionList,
   type Photo,
   Settings,
   type TimelineEvent,
@@ -43,6 +45,12 @@ export function useSettings(): Settings {
 export function usePairedDevice(): PairedDevice | null {
   const [raw] = useMMKVString(StorageKeys.pairedDevice, mmkv);
   return useMemo(() => parseRaw(raw, PairedDevice), [raw]);
+}
+
+/** 文字起こし待ち（中断・失敗で残っている分を含む）の一覧。 */
+export function usePendingTranscriptions(): PendingTranscription[] {
+  const [raw] = useMMKVString(StorageKeys.pendingTranscriptions, mmkv);
+  return useMemo(() => parseRaw(raw, PendingTranscriptionList) ?? [], [raw]);
 }
 
 export function useDates(): string[] {

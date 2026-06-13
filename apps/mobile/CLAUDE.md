@@ -61,12 +61,17 @@ The UUIDs and packet formats must match the firmware (`firmware/src/config.h`).
   firmware version (see `compareVersions`).
 - **Audio / transcription**: accumulates the Opus stream into ~10 s segments. Each segment is
   appended to a per-session concatenated Ogg/Opus file (`AudioSession`) via the incremental writer
-  in `modules/audio.ts`, and transcribed by `transcribe()` (`modules/llm`, which resolves the
+  in `modules/audio.ts`, staged durably as a `PendingTranscription` record + standalone segment
+  Ogg (`audio/pending/`), and transcribed by `transcribe()` (`modules/llm`, which resolves the
   provider from `Settings.audio.transcriptionModel`) with the text and the actual model ref stored
-  on its `AudioChunk`. Corrupt frames (Opus TOC code ≠ 0, from rare
-  BLE glitches) are dropped before muxing or playback breaks. The `/transcript` screen renders a
-  day's sessions with an audio player (Android/Web only — iOS can't decode Ogg/Opus) and the
-  per-segment transcript.
+  on its `AudioChunk`; on success the pending record/file are deleted, on failure or app kill they
+  survive and `resumePendingTranscriptions()` (`modules/transcriptionBacklog.ts`) re-runs them —
+  automatically at launch (`DeviceProvider`) and via the resume banner on `/transcript`. Corrupt
+  frames (Opus TOC code ≠ 0, from rare BLE glitches) are dropped before muxing or playback breaks.
+  The `/transcript` screen renders a day's sessions with an audio player (Android/Web only — iOS
+  can't decode Ogg/Opus) and the per-segment transcript. Sync and the transcription queue signal
+  `modules/backgroundWork.ts` so `useDeviceKeepAlive` keeps the Android foreground service up
+  (with state-aware notification text) until the work drains, even after BLE disconnects.
 
 ## LLM clients
 

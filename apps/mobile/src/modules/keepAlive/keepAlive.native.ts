@@ -2,14 +2,15 @@
  * keepAlive の native 実装（実体は Android 専用、iOS は no-op）。
  *
  * Android はバックグラウンドで数分経つと Doze / OEM の省電力キラーがアプリの
- * プロセスごと kill し、BLE キャプチャ（useDeviceCapture）が止まる。接続中だけ
- * notifee の connectedDevice フォアグラウンドサービス（常駐通知）を立てて
- * kill 対象から外す。iOS は UIBackgroundModes の bluetooth-central で足りる。
+ * プロセスごと kill し、BLE キャプチャ（useDeviceCapture）や同期後の文字起こし
+ * が止まる。接続中・処理中は notifee の connectedDevice フォアグラウンド
+ * サービス（常駐通知）を立てて kill 対象から外す。iOS は接続中の BLE は
+ * UIBackgroundModes の bluetooth-central で足りる（処理のみの継続は不可）。
  */
 import notifee, { AndroidForegroundServiceType, AndroidImportance } from '@notifee/react-native';
 import { Alert, Platform } from 'react-native';
 import { mmkv } from '../../data/storage/mmkv';
-import type { KeepAlive } from './types';
+import type { KeepAlive, KeepAliveNotification } from './types';
 
 const NOTIFICATION_ID = 'device-connection';
 const CHANNEL_ID = 'device-connection';
@@ -22,7 +23,7 @@ if (Platform.OS === 'android') {
   notifee.registerForegroundService(() => new Promise(() => {}));
 }
 
-async function start(): Promise<void> {
+async function start(notification: KeepAliveNotification): Promise<void> {
   if (Platform.OS !== 'android') return;
   // Android 13+ の通知権限。拒否されてもサービス自体は動く（通知が見えないだけ）。
   await notifee.requestPermission();
@@ -31,10 +32,11 @@ async function start(): Promise<void> {
     name: 'デバイス接続',
     importance: AndroidImportance.LOW,
   });
+  // 同じ ID への displayNotification は既存の通知（とサービス）を更新する。
   await notifee.displayNotification({
     id: NOTIFICATION_ID,
-    title: 'envsense と接続中',
-    body: '写真と音声を記録しています',
+    title: notification.title,
+    body: notification.body,
     android: {
       channelId,
       asForegroundService: true,

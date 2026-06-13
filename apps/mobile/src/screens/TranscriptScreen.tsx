@@ -14,8 +14,18 @@ import { Platform, Pressable, View } from 'react-native';
 import { StyleSheet } from 'react-native-unistyles';
 import { Card, ModalScreen, SectionHeader } from '../components';
 import type { AudioChunk, AudioSession } from '../data';
-import { absoluteUri, dateKey, useAudioChunksForDay, useAudioSessionsForDay } from '../data';
-import { Icon, Text } from '../ui';
+import {
+  absoluteUri,
+  dateKey,
+  useAudioChunksForDay,
+  useAudioSessionsForDay,
+  usePendingTranscriptions,
+} from '../data';
+import {
+  resumePendingTranscriptions,
+  useTranscriptionResumeRunning,
+} from '../modules/transcriptionBacklog';
+import { Button, Icon, Text } from '../ui';
 
 function formatDate(date: Date): string {
   return format(date, 'M 月 d 日 EEEE', { locale: ja });
@@ -67,6 +77,7 @@ export function TranscriptScreen() {
   return (
     <ModalScreen title={formatDate(dateObj)} subtitle="録音と文字起こし">
       <View style={styles.flow}>
+        <PendingTranscriptionBanner />
         {sessions.length === 0 ? (
           <View style={styles.gutter}>
             <Card tone="soft" padding="md">
@@ -92,6 +103,36 @@ export function TranscriptScreen() {
         )}
       </View>
     </ModalScreen>
+  );
+}
+
+/**
+ * 文字起こしが中断（アプリ終了・API 失敗）したまま残っているセグメントの再開
+ * バナー。残量は日付を問わず全体（再開も全体を時刻順に処理する）。0 件なら
+ * 何も出さない。起動時にも自動再開されるので、これは失敗後の手動リトライ用。
+ */
+function PendingTranscriptionBanner() {
+  const pendings = usePendingTranscriptions();
+  const resuming = useTranscriptionResumeRunning();
+  if (pendings.length === 0) return null;
+  return (
+    <View style={styles.gutter}>
+      <Card tone="soft" padding="md">
+        <View style={styles.pendingRow}>
+          <Text variant="caption" color="textMuted" style={styles.pendingLabel}>
+            未文字起こしの音声が {pendings.length} 件あります。
+          </Text>
+          <Button
+            size="sm"
+            variant="outline"
+            loading={resuming}
+            onPress={() => void resumePendingTranscriptions()}
+          >
+            {resuming ? '文字起こし中…' : '再開'}
+          </Button>
+        </View>
+      </Card>
+    </View>
   );
 }
 
@@ -201,6 +242,14 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  pendingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing.sm,
+  },
+  pendingLabel: {
+    flex: 1,
   },
   transcriptList: {
     gap: theme.spacing.sm,

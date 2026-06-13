@@ -8,6 +8,7 @@
  * status は null のまま = UI は同期 UI を出さない。
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { beginBackgroundWork } from './backgroundWork';
 import type { BleDevice } from './ble';
 import {
   type DeviceSyncStatus,
@@ -74,6 +75,8 @@ export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
     setSyncing(true);
     setError(null);
     setProgress(null);
+    // 同期中（転送 + 文字起こし flush）は keepAlive のフォアグラウンドサービスを維持する。
+    const endWork = beginBackgroundWork();
     try {
       const result = await runDeviceSync(device, setProgress);
       console.log(`Sync complete: ${result.files} files (${result.skipped} skipped)`);
@@ -86,6 +89,7 @@ export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
       console.warn('Sync failed', err);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      endWork();
       setSyncing(false);
       setProgress(null);
     }

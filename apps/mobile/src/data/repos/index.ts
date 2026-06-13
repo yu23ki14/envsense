@@ -4,10 +4,11 @@ export {
   audioPath,
   audioSessionPath,
   deleteFile,
+  fileExists,
   fileSize,
+  pendingAudioPath,
   photoPath,
   readBytes,
-  tempAudioPath,
   writeBytes,
 } from '../storage/files';
 export * as secrets from '../storage/secrets';
@@ -25,6 +26,7 @@ export {
 export * from './daySummaryRepo';
 export * from './highlightRepo';
 export * from './pairedDeviceRepo';
+export * from './pendingTranscriptionRepo';
 export * from './photoRepo';
 export * from './settingsRepo';
 export * from './timelineEventRepo';

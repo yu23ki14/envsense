@@ -11,6 +11,8 @@ export const StorageKeys = {
   day: (date: string) => `day:${date}`,
   daySummary: (date: string) => `summary:${date}`,
 
+  pendingTranscriptions: 'transcription:pending',
+
   dateIndex: 'index:dates',
   photosByDay: (date: string) => `index:photos-by-day:${date}`,
   audiosByDay: (date: string) => `index:audios-by-day:${date}`,

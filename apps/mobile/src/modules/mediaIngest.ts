@@ -6,22 +6,22 @@
  * 列はセッション単位の連結 Ogg ファイル（AudioSession）へ追記され、約 10 秒
  * 単位で文字起こしされて AudioChunk になる。
  */
-import type { AudioSession, Photo, PhotoRotation } from '../data';
+import type { AudioSession, PendingTranscription, Photo, PhotoRotation } from '../data';
 import {
+  addPendingTranscription,
   appendBytes,
   audioSessionPath,
   dateKey,
-  deleteFile,
   newId,
+  pendingAudioPath,
   photoPath,
-  saveAudioChunk,
   saveAudioSession,
   savePhoto,
-  tempAudioPath,
   writeBytes,
 } from '../data';
 import { oggOpusAudioPages, oggOpusHeaderBytes, opusFramesToOgg, randomOggSerial } from './audio';
-import { transcribe } from './llm';
+import { beginBackgroundWork } from './backgroundWork';
+import { transcribePending } from './transcriptionBacklog';
 
 export const FRAMES_PER_SEGMENT = 500; // ~10s at 20ms per Opus frame.
 export const FRAME_DURATION_MS = 20;
@@ -160,35 +160,28 @@ function finalizeSession(session: AudioSession): void {
   saveAudioSession({ ...session, finalized: true });
 }
 
-// Transcribe one segment via a transient Ogg file (RN can't build a Blob from
-// bytes, so the upload reads back a real file). A chunk is only saved when
-// transcription returns speech — silent/non-speech segments (which Whisper
-// otherwise hallucinates onto) yield an empty string and no chunk.
-async function transcribeChunk(
+// Stage one segment for transcription as a standalone Ogg file (RN can't build
+// a Blob from bytes, so the upload reads back a real file) plus a persisted
+// PendingTranscription record. Both are written before transcription starts,
+// so segments still waiting in the queue survive an app kill and can be
+// resumed (transcriptionBacklog).
+function stagePendingTranscription(
   sessionId: string,
   startedAt: number,
   endedAt: number,
   frames: Uint8Array[],
-): Promise<void> {
+): PendingTranscription {
   const id = newId();
-  const tempRel = tempAudioPath(id);
-  try {
-    writeBytes(tempRel, opusFramesToOgg(frames));
-    const { text, model } = await transcribe(tempRel);
-    if (text.length === 0) return;
-    saveAudioChunk({
-      id,
-      sessionId,
-      startedAt,
-      endedAt,
-      transcript: { text, model },
-      transcribedAt: Date.now(),
-    });
-  } catch (err) {
-    console.warn('Transcription failed', err);
-  } finally {
-    deleteFile(tempRel);
-  }
+  const pending: PendingTranscription = {
+    id,
+    sessionId,
+    startedAt,
+    endedAt,
+    filePath: pendingAudioPath(id),
+  };
+  writeBytes(pending.filePath, opusFramesToOgg(frames));
+  addPendingTranscription(pending);
+  return pending;
 }
 
 /**
@@ -228,10 +221,13 @@ export class AudioSessionIngestor {
     }
     this.active = appendSegment(this.active, frames, startedAt, endedAt);
 
-    const sessionId = this.active.id;
-    this.transcriptionQueue = this.transcriptionQueue.then(() =>
-      transcribeChunk(sessionId, startedAt, endedAt, frames),
-    );
+    const pending = stagePendingTranscription(this.active.id, startedAt, endedAt, frames);
+    // begin/end は「キュー待ち〜完了」を覆う。BLE 切断後もキューが空になるまで
+    // keepAlive のフォアグラウンドサービスを維持するため（backgroundWork）。
+    const endWork = beginBackgroundWork();
+    this.transcriptionQueue = this.transcriptionQueue
+      .then(() => transcribePending(pending))
+      .finally(endWork);
   }
 
   /** アクティブセッションを閉じ、積まれた文字起こしの完了を待つ。 */

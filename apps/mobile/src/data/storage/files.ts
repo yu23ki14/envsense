@@ -21,9 +21,13 @@ export function audioSessionPath(startedAtMs: number, id: string): string {
   return `audio/sessions/${sub}/${id}.ogg`;
 }
 
-/** Transient file used only to upload one segment to Groq, then deleted. */
-export function tempAudioPath(id: string): string {
-  return `audio/tmp/${id}.ogg`;
+/**
+ * Per-segment Ogg awaiting transcription. Kept on disk (with its
+ * PendingTranscription record) until transcription succeeds, so an interrupted
+ * run can be resumed later.
+ */
+export function pendingAudioPath(id: string): string {
+  return `audio/pending/${id}.ogg`;
 }
 
 function fileFor(relative: string): File {
@@ -70,6 +74,10 @@ export async function readBytes(relative: string): Promise<Uint8Array | null> {
 export function deleteFile(relative: string): void {
   const file = fileFor(relative);
   if (file.exists) file.delete();
+}
+
+export function fileExists(relative: string): boolean {
+  return fileFor(relative).exists;
 }
 
 export function fileSize(relative: string): number {
