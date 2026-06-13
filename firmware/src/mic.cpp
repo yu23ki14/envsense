@@ -59,7 +59,7 @@ bool mic_start()
     // I2S pin configuration for XIAO ESP32S3 Sense PDM microphone
     i2s_pin_config_t pin_config = {
         .bck_io_num = I2S_PIN_NO_CHANGE,
-        .ws_io_num = MIC_CLK_PIN,   // PDM CLK
+        .ws_io_num = MIC_CLK_PIN, // PDM CLK
         .data_out_num = I2S_PIN_NO_CHANGE,
         .data_in_num = MIC_DATA_PIN, // PDM DATA
     };

@@ -9,8 +9,8 @@
 
 #include "config.h" // Use config.h for all configurations
 #include "driver/rtc_io.h"
-#include "esp_rom_crc.h"
 #include "esp_camera.h"
+#include "esp_rom_crc.h"
 #include "esp_sleep.h"
 #include "mic.h"
 #include "opus_encoder.h"
@@ -41,13 +41,6 @@ volatile bool touchDebugLed = false;      // TOUCH_DEBUG_LOG: mirror the touch s
 // before the BLE stack is torn down (see PowerControlCallback)
 volatile bool powerOffRequested = false;
 volatile bool rebootRequested = false;
-
-// Gentle power optimization
-unsigned long lastActivity = 0;
-bool powerSaveMode = false;
-
-// Light sleep optimization - saves ~15mA = adds 3-4 hours battery life
-bool lightSleepEnabled = true;
 
 // ---------------------------------------------------------------------------------
 // BLE - Using config.h definitions
@@ -187,10 +180,7 @@ void setupTouch();
 void handleTouch();
 void updateLED();
 void blinkLED(int count, int delayMs);
-void enterPowerSave();
-void exitPowerSave();
 void shutdownDevice();
-void enableLightSleep();
 
 // Audio forward declarations
 void onMicData(int16_t *data, size_t samples);
@@ -199,7 +189,7 @@ void processAudioTx();
 
 // Sync forward declarations
 void updateSyncStatus(bool notifyApp);
-void processSync(unsigned long now);
+void processSync();
 
 // Capture mode forward declarations
 void applyCaptureMode(uint8_t mode);
@@ -212,10 +202,6 @@ void IRAM_ATTR buttonISR()
 {
     buttonPressed = true;
 }
-
-// Touch interrupt only exists to wake the chip out of light sleep so the main
-// loop can resume polling the foil; the handler itself has nothing to do.
-void IRAM_ATTR touchWakeISR() {}
 
 // -------------------------------------------------------------------------
 // LED Functions
@@ -329,17 +315,7 @@ void handleButton()
             return;
         }
         buttonDown = false;
-        unsigned long pressDuration = now - buttonPressTime;
         lastDebounceTime = now;
-
-        // Only handle short press if long press wasn't already triggered
-        if (!longPressTriggered && pressDuration >= 50) {
-            // Short press - register activity
-            lastActivity = now;
-            if (powerSaveMode) {
-                exitPowerSave();
-            }
-        }
         longPressTriggered = false;
     }
 
@@ -402,14 +378,10 @@ void setupTouch()
         }
         touchBaseline = (uint32_t) (sum / TOUCH_BASELINE_SAMPLES);
     }
-    Serial.printf("Touch baseline: %lu, on/off thresholds: %lu / %lu\n", (unsigned long) touchBaseline,
-                  (unsigned long) touchOnThreshold(), (unsigned long) touchOffThreshold());
-
-    // Arm touch wake-up for light sleep: while BLE-connected the main loop can
-    // sit in esp_light_sleep_start() for up to 15s and would never poll the
-    // foil. A touch wakes the loop, which then times the 2s hold as usual.
-    touchAttachInterrupt(TOUCH_SENSE_PIN, touchWakeISR, (uint32_t) (touchBaseline * TOUCH_TOUCH_RATIO));
-    esp_sleep_enable_touchpad_wakeup();
+    Serial.printf("Touch baseline: %lu, on/off thresholds: %lu / %lu\n",
+                  (unsigned long) touchBaseline,
+                  (unsigned long) touchOnThreshold(),
+                  (unsigned long) touchOffThreshold());
 }
 
 void handleTouch()
@@ -454,8 +426,10 @@ void handleTouch()
     touchDebugLed = touched;
     static unsigned long lastLogTime = 0;
     if (now - lastLogTime >= 1000) {
-        Serial.printf("Touch filtered: %lu baseline: %lu (on: %lu / off: %lu)\n", (unsigned long) filtered,
-                      (unsigned long) touchBaseline, (unsigned long) touchOnThreshold(),
+        Serial.printf("Touch filtered: %lu baseline: %lu (on: %lu / off: %lu)\n",
+                      (unsigned long) filtered,
+                      (unsigned long) touchBaseline,
+                      (unsigned long) touchOnThreshold(),
                       (unsigned long) touchOffThreshold());
         lastLogTime = now;
     }
@@ -485,64 +459,6 @@ void handleTouch()
 // -------------------------------------------------------------------------
 // Power Management
 // -------------------------------------------------------------------------
-void enterPowerSave()
-{
-    if (!powerSaveMode) {
-        // Below 80MHz the PLL powers down and takes the I2S/PDM mic clock
-        // with it, so the 40MHz floor is only allowed when the mic is off.
-        // With always-on VAD capture the savings come from skipping the Opus
-        // encode + SD writes during silence, not from the CPU clock.
-        if (!mic_is_running()) {
-            setCpuFrequencyMhz(MIN_CPU_FREQ_MHZ); // 40MHz for idle
-        }
-        powerSaveMode = true;
-    }
-}
-
-void exitPowerSave()
-{
-    if (powerSaveMode) {
-        setCpuFrequencyMhz(NORMAL_CPU_FREQ_MHZ); // Back to 80MHz
-        powerSaveMode = false;
-    }
-}
-
-void enableLightSleep()
-{
-    // Light sleep gates the I2S DMA clock, so it is incompatible with the
-    // always-on VAD capture; it only ever fires when the mic is stopped.
-    if (!lightSleepEnabled || !connected || photoDataUploading || mic_is_running() || syncState != SYNC_IDLE) {
-        return;
-    }
-
-    unsigned long now = millis();
-
-    // Don't sleep if there was recent activity (within 5 seconds)
-    if (now - lastActivity < 5000) {
-        return;
-    }
-
-    unsigned long timeUntilNextPhoto = 0;
-
-    if (isCapturingPhotos && captureInterval > 0) {
-        unsigned long timeSinceLastPhoto = now - lastCaptureTime;
-        if (timeSinceLastPhoto < captureInterval) {
-            timeUntilNextPhoto = captureInterval - timeSinceLastPhoto;
-        }
-    }
-
-    // Only sleep if we have at least 10 seconds until next photo
-    if (timeUntilNextPhoto > 10000) {
-        // Configure light sleep to wake on BLE events and timer
-        unsigned long sleepTime = timeUntilNextPhoto - 5000;
-        if (sleepTime > 15000)
-            sleepTime = 15000;                           // Max 15 seconds
-        esp_sleep_enable_timer_wakeup(sleepTime * 1000); // Wake 5s before photo or max 15s
-        esp_light_sleep_start();
-        lastActivity = millis(); // Update activity time after wake
-    }
-}
-
 void shutdownDevice()
 {
     Serial.println("Shutting down device...");
@@ -742,7 +658,7 @@ void processAudioTx()
     }
 
     // A notification's value can be at most ATT_MTU - 3 bytes.
-    size_t maxValue = (negotiatedMtu > 6) ? (size_t)(negotiatedMtu - 3) : 20;
+    size_t maxValue = (negotiatedMtu > 6) ? (size_t) (negotiatedMtu - 3) : 20;
     if (maxValue > sizeof(audio_batch_buffer)) {
         maxValue = sizeof(audio_batch_buffer);
     }
@@ -772,7 +688,7 @@ void processAudioTx()
 
             // Consume the length field, then copy the frame bytes.
             audio_tx_read_pos = (audio_tx_read_pos + 2) % AUDIO_TX_BUFFER_SIZE;
-            audio_batch_buffer[pos++] = (uint8_t)len;
+            audio_batch_buffer[pos++] = (uint8_t) len;
             for (uint16_t i = 0; i < len; i++) {
                 audio_batch_buffer[pos++] = audio_tx_buffer[audio_tx_read_pos];
                 audio_tx_read_pos = (audio_tx_read_pos + 1) % AUDIO_TX_BUFFER_SIZE;
@@ -837,7 +753,6 @@ class ServerHandler : public BLEServerCallbacks
     {
         connected = true;
         audioSubscribed = false;
-        lastActivity = millis(); // Register activity - prevents sleep
         Serial.println(">>> BLE Client connected.");
         // Send current battery level, unsynced stats and capture mode on connect
         updateBatteryService();
@@ -850,8 +765,11 @@ class ServerHandler : public BLEServerCallbacks
         // lever for bulk-sync throughput: with the BLE-default ~30-50 ms
         // interval the controller sends only a couple of notifications per
         // event, so a multi-MB transfer takes many minutes.
-        server->updateConnParams(param->connect.remote_bda, SYNC_CONN_INTERVAL_MIN,
-                                 SYNC_CONN_INTERVAL_MAX, 0, SYNC_CONN_SUPERVISION_TIMEOUT);
+        server->updateConnParams(param->connect.remote_bda,
+                                 SYNC_CONN_INTERVAL_MIN,
+                                 SYNC_CONN_INTERVAL_MAX,
+                                 0,
+                                 SYNC_CONN_SUPERVISION_TIMEOUT);
     }
     void onDisconnect(BLEServer *server) override
     {
@@ -913,7 +831,6 @@ class PhotoControlCallback : public BLECharacteristicCallbacks
             int8_t received = characteristic->getData()[0];
             Serial.print("PhotoControl received: ");
             Serial.println(received);
-            lastActivity = millis(); // Register activity - prevents sleep
             handlePhotoControl(received);
         }
     }
@@ -926,7 +843,6 @@ class ModeControlCallback : public BLECharacteristicCallbacks
         if (characteristic->getLength() == 1) {
             uint8_t mode = characteristic->getData()[0];
             Serial.printf("ModeControl received: 0x%02X\n", mode);
-            lastActivity = millis();
             // Applied in loop_app: the NVS write is too slow for a BLE callback
             requestedMode = mode;
             modeChangeRequested = true;
@@ -961,7 +877,6 @@ class SyncControlCallback : public BLECharacteristicCallbacks
         if (len < 1) {
             return;
         }
-        lastActivity = millis();
         uint32_t fileId = 0;
         if (len >= 5) {
             fileId = (uint32_t) data[1] | ((uint32_t) data[2] << 8) | ((uint32_t) data[3] << 16) |
@@ -1192,7 +1107,7 @@ static bool syncNotify(size_t len)
 
 // Drives the sync transfer a bounded amount per loop_app() pass so the touch
 // sensor / button / photo capture stay responsive during multi-minute syncs.
-void processSync(unsigned long now)
+void processSync()
 {
     if (syncAbortRequested) {
         syncAbortRequested = false;
@@ -1308,7 +1223,6 @@ void processSync(unsigned long now)
             syncManifestSendIndex += n;
             delay(SYNC_CHUNK_DELAY_MS);
         }
-        lastActivity = now;
         return;
     }
 
@@ -1323,8 +1237,8 @@ void processSync(unsigned long now)
                     delay(SYNC_CONGESTION_BACKOFF_MS); // resend FILE_END next pass
                     break;
                 }
-                Serial.printf("sync: file %lu sent (%lu bytes)\n", (unsigned long) syncFile->id,
-                              (unsigned long) syncFile->size);
+                Serial.printf(
+                    "sync: file %lu sent (%lu bytes)\n", (unsigned long) syncFile->id, (unsigned long) syncFile->size);
                 syncFile = nullptr;
                 syncState = SYNC_IDLE;
                 break;
@@ -1350,7 +1264,6 @@ void processSync(unsigned long now)
             syncFileSeq++;
             delay(SYNC_CHUNK_DELAY_MS);
         }
-        lastActivity = now;
     }
 }
 
@@ -1541,7 +1454,6 @@ bool take_photo()
     current_photo_orientation = FIXED_IMAGE_ORIENTATION;
     Serial.println("Photo orientation set to 180 degrees (fixed).");
 
-    lastActivity = millis(); // Register activity
     return true;
 }
 
@@ -1645,9 +1557,8 @@ void setup_app()
     digitalWrite(STATUS_LED_PIN, HIGH); // Leave the pin deselected for the SD card
     ledMode = LED_NORMAL_OPERATION;
 
-    // Power optimization from config.h
+    // Fixed CPU frequency from config.h (mic clock requires >= 80MHz)
     setCpuFrequencyMhz(NORMAL_CPU_FREQ_MHZ);
-    lastActivity = millis();
 
     configure_ble();
     configure_camera();
@@ -1707,7 +1618,6 @@ void setup_app()
     }
 
     Serial.println("Setup complete.");
-    Serial.println("Light sleep optimization enabled for extended battery life.");
 }
 
 void loop_app()
@@ -1740,8 +1650,7 @@ void loop_app()
     // One-shot wakeup cause log, delayed so the USB CDC host can re-attach first
     static bool wakeCauseLogged = false;
     if (!wakeCauseLogged && now > 8000) {
-        Serial.printf("Wakeup cause: %d (0=power-on 3=button 4=timer 5=touch)\n",
-                      (int) esp_sleep_get_wakeup_cause());
+        Serial.printf("Wakeup cause: %d (0=power-on 3=button 4=timer 5=touch)\n", (int) esp_sleep_get_wakeup_cause());
         wakeCauseLogged = true;
     }
 
@@ -1769,7 +1678,7 @@ void loop_app()
     ota_loop();
 
     // Sync transfer (manifest / file chunks / acks / deferred time set)
-    processSync(now);
+    processSync();
 
     // Notify the app when the unsynced counts change (throttled; the app also
     // reads SYNC_STATUS on connect).
@@ -1791,15 +1700,6 @@ void loop_app()
     // 音声のキャプチャ/エンコード/送信はすべて audioTask(専用タスク)で実行する。
     // ここ(loopTask)で送ると写真送信などでループが詰まる間に TX リングが溢れて
     // 音声フレームを落とすため、producer と同じタスク内で送るようにした。
-
-    // Check for power save mode (gentle optimization)
-    if (!connected && !photoDataUploading && (now - lastActivity > IDLE_THRESHOLD_MS)) {
-        enterPowerSave();
-    } else if (connected || photoDataUploading) {
-        if (powerSaveMode)
-            exitPowerSave();
-        lastActivity = now;
-    }
 
     // Check battery level periodically
     if (now - lastBatteryCheck >= BATTERY_TASK_INTERVAL_MS) {
@@ -1894,8 +1794,6 @@ void loop_app()
             Serial.print(" bytes), ");
             Serial.print(remaining - bytes_to_copy);
             Serial.println(" bytes remaining.");
-
-            lastActivity = now; // Register activity
         } else {
             // End of photo marker
             s_compressed_frame_2[0] = 0xFF;
@@ -1915,18 +1813,10 @@ void loop_app()
         photo_chunks_this_loop = 0; // Reset when not uploading
     }
 
-    // Light sleep optimization - major power savings while maintaining BLE
-    // Disable light sleep when audio is active
-    if (!photoDataUploading && !audioSubscribed) {
-        enableLightSleep();
-    }
-
-    // Adaptive delays for power saving (gentle optimization)
+    // Adaptive loop delay: fast while streaming, relaxed otherwise.
     if (photoDataUploading || audioSubscribed) {
         delay(5); // Fast during upload or audio streaming
-    } else if (powerSaveMode) {
-        delay(50); // Reduced delay with light sleep
     } else {
-        delay(50); // Reduced delay with light sleep
+        delay(50);
     }
 }

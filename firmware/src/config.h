@@ -19,20 +19,11 @@
 // =============================================================================
 // POWER MANAGEMENT - Optimized for MINIMUM 6-8 hours, targeting 10+ hours
 // =============================================================================
-// CPU Frequency Management - Aggressive power optimization
-// NOTE: below 80MHz the CPU clocks from the 40MHz XTAL and the PLL powers
-// down, which kills the I2S/PDM mic clock. While always-on VAD capture is
-// running the device must stay at NORMAL_CPU_FREQ_MHZ; MIN_CPU_FREQ_MHZ is
-// only safe when the mic is stopped. The real idle savings come from VAD
+// CPU Frequency - fixed at 80MHz. Below 80MHz the CPU clocks from the 40MHz
+// XTAL and the PLL powers down, which kills the I2S/PDM mic clock; since VAD
+// capture is always on, the clock must never drop. Idle savings come from VAD
 // skipping the Opus encode + SD writes during silence.
-#define MAX_CPU_FREQ_MHZ 100   // Further reduced from 120MHz - still sufficient
-#define MIN_CPU_FREQ_MHZ 40    // Ultra-low power, mic-off states only (see note above)
-#define NORMAL_CPU_FREQ_MHZ 80 // Normal operation frequency (good balance)
-
-// Sleep Management
-#define LIGHT_SLEEP_DURATION_US 50000  // 50ms light sleep intervals
-#define DEEP_SLEEP_THRESHOLD_MS 300000 // 5 minutes of inactivity triggers deep sleep
-#define IDLE_THRESHOLD_MS 45000        // 45 seconds to enter power save mode (was 30s)
+#define NORMAL_CPU_FREQ_MHZ 80 // Operating frequency (fixed)
 
 // Battery Configuration - Dual 250mAh @ 3.5V-4.1V under load (500mAh total)
 #define BATTERY_MAX_VOLTAGE 4.2f      // 4.2V fully charged (under load)
@@ -104,16 +95,6 @@ typedef enum {
 #define BLE_CONN_TIMEOUT 800     // 8 second supervision timeout
 
 // =============================================================================
-// POWER STATES
-// =============================================================================
-typedef enum {
-    POWER_STATE_ACTIVE,      // Normal operation - camera + BLE active
-    POWER_STATE_POWER_SAVE,  // Reduced frequency, longer intervals
-    POWER_STATE_LOW_BATTERY, // Minimal operation
-    POWER_STATE_SLEEP        // Deep sleep mode
-} power_state_t;
-
-// =============================================================================
 // TASK CONFIGURATION - Optimized stack sizes
 // =============================================================================
 #define BATTERY_TASK_STACK_SIZE 2048
@@ -131,9 +112,9 @@ typedef enum {
 #define MIC_CLK_PIN 42  // PDM Clock pin (GPIO42)
 #define MIC_DATA_PIN 41 // PDM Data pin (GPIO41)
 
-#define MIC_SAMPLE_RATE 16000          // 16kHz sample rate
-#define MIC_BUFFER_SAMPLES 1600        // 100ms buffer (16000 * 0.1)
-#define MIC_GAIN 4                     // Microphone gain multiplier (clamped to int16 in mic.cpp)
+#define MIC_SAMPLE_RATE 16000   // 16kHz sample rate
+#define MIC_BUFFER_SAMPLES 1600 // 100ms buffer (16000 * 0.1)
+#define MIC_GAIN 4              // Microphone gain multiplier (clamped to int16 in mic.cpp)
 // One-pole DC blocker applied in mic_process before gain. The PDM mic sits on a
 // large DC pedestal (~1900 raw); left in, the energy VAD reads it as permanent
 // speech. Closer to 1.0 = lower corner frequency; 0.995 @ 16kHz ≈ 13Hz, well
@@ -147,16 +128,16 @@ typedef enum {
 // =============================================================================
 // OPUS CODEC CONFIGURATION
 // =============================================================================
-#define AUDIO_CODEC_ID 21              // Opus codec ID (matches Omi protocol)
-#define OPUS_FRAME_SAMPLES 320         // 20ms frame @ 16kHz
-#define OPUS_OUTPUT_MAX_BYTES 160      // Max encoded frame size
-#define OPUS_BITRATE 32000             // 32kbps
-#define OPUS_COMPLEXITY 3              // Encoding complexity (1-10)
-#define OPUS_VBR 1                     // Variable bitrate enabled
+#define AUDIO_CODEC_ID 21         // Opus codec ID (matches Omi protocol)
+#define OPUS_FRAME_SAMPLES 320    // 20ms frame @ 16kHz
+#define OPUS_OUTPUT_MAX_BYTES 160 // Max encoded frame size
+#define OPUS_BITRATE 32000        // 32kbps
+#define OPUS_COMPLEXITY 3         // Encoding complexity (1-10)
+#define OPUS_VBR 1                // Variable bitrate enabled
 
 // Audio BLE packet configuration
-#define AUDIO_PACKET_HEADER_SIZE 3     // 2 bytes index + 1 byte frame count
-#define AUDIO_TX_RING_BUFFER_SIZE 64   // Encoded frames buffered (~1.3s) to ride out TX stalls
+#define AUDIO_PACKET_HEADER_SIZE 3   // 2 bytes index + 1 byte frame count
+#define AUDIO_TX_RING_BUFFER_SIZE 64 // Encoded frames buffered (~1.3s) to ride out TX stalls
 
 // =============================================================================
 // VAD (Voice Activity Detection) - silence is neither encoded nor stored
@@ -164,11 +145,11 @@ typedef enum {
 // Energy VAD over 20ms PCM frames (after MIC_GAIN). The threshold is the mean
 // absolute amplitude of a frame; tune on-device with VAD_DEBUG_LOG if speech
 // is clipped or noise leaks through.
-#define VAD_THRESHOLD 500           // Mean |amplitude| (int16, DC-removed) above which a frame is voiced
-#define VAD_TRIGGER_FRAMES 2        // Consecutive voiced frames to start an utterance (40ms)
-#define VAD_HANGOVER_MS 2000        // Silence that ends an utterance (bridges normal speech pauses)
-#define VAD_PREROLL_MS 1000         // PCM kept before the trigger so speech onsets aren't clipped
-#define VAD_DEBUG_LOG 0             // 1: log per-second frame energy for threshold calibration
+#define VAD_THRESHOLD 500    // Mean |amplitude| (int16, DC-removed) above which a frame is voiced
+#define VAD_TRIGGER_FRAMES 2 // Consecutive voiced frames to start an utterance (40ms)
+#define VAD_HANGOVER_MS 2000 // Silence that ends an utterance (bridges normal speech pauses)
+#define VAD_PREROLL_MS 1000  // PCM kept before the trigger so speech onsets aren't clipped
+#define VAD_DEBUG_LOG 0      // 1: log per-second frame energy for threshold calibration
 
 // =============================================================================
 // MICROSD STORAGE - SD-first capture (XIAO ESP32S3 Sense expansion board)
@@ -179,11 +160,11 @@ typedef enum {
 // any digitalWrite to it would yank the card's chip select mid-transaction and
 // corrupt the filesystem. The LED is only used before storage_init().
 #define SD_CS_PIN 21
-#define SD_SPI_FREQ_HZ 20000000     // 20MHz; conservative for wiring through the expansion board
-#define AUDIO_DIR "/audio"          // Utterance files: <epoch_ms>.opp (length-prefixed Opus frames)
-#define PHOTO_DIR "/photo"          // Photo files: <epoch_ms>_<orientation>.jpg
-#define AUDIO_FILE_MAX_MS 300000    // Split utterances at 5 min to bound the BLE transfer unit
-#define STORAGE_FLUSH_BYTES 4096    // Buffer audio frames and write to SD in 4KB batches
+#define SD_SPI_FREQ_HZ 20000000  // 20MHz; conservative for wiring through the expansion board
+#define AUDIO_DIR "/audio"       // Utterance files: <epoch_ms>.opp (length-prefixed Opus frames)
+#define PHOTO_DIR "/photo"       // Photo files: <epoch_ms>_<orientation>.jpg
+#define AUDIO_FILE_MAX_MS 300000 // Split utterances at 5 min to bound the BLE transfer unit
+#define STORAGE_FLUSH_BYTES 4096 // Buffer audio frames and write to SD in 4KB batches
 // Clocks below this (2021-01-01 UTC) are "invalid": the RTC lost power and the
 // app hasn't written TIME_SYNC yet. Files recorded before the first sync get
 // their timestamps shifted forward when the real time arrives.
@@ -195,14 +176,16 @@ typedef enum {
 #define SYNC_MANIFEST_MAX_ENTRIES 2048 // Manifest table in PSRAM (~1 day of photos + utterances)
 #define SYNC_CHUNKS_PER_LOOP 16        // Max file chunks attempted per loop_app() pass (keeps touch/button responsive)
 #define SYNC_CHUNK_DELAY_MS 1          // Pause between chunk notifications so the BLE stack can flush
-#define SYNC_CONGESTION_BACKOFF_MS 5   // Wait after a notify is rejected (TX buffer full) before resending — under one connection interval so throughput stays high
+#define SYNC_CONGESTION_BACKOFF_MS                                                                                     \
+    5 // Wait after a notify is rejected (TX buffer full) before resending — under one connection interval so throughput
+      // stays high
 // Fast connection interval requested on connect (units of 1.25 ms). A short
 // interval lets the central poll often, which is the main lever for bulk-sync
 // throughput; both iOS and Android honor a reasonable request.
-#define SYNC_CONN_INTERVAL_MIN 6       // 7.5 ms
-#define SYNC_CONN_INTERVAL_MAX 12      // 15 ms
+#define SYNC_CONN_INTERVAL_MIN 6          // 7.5 ms
+#define SYNC_CONN_INTERVAL_MAX 12         // 15 ms
 #define SYNC_CONN_SUPERVISION_TIMEOUT 400 // 4 s
-#define SYNC_STATUS_INTERVAL_MS 10000  // Min interval between unsynced-stats notifications
+#define SYNC_STATUS_INTERVAL_MS 10000     // Min interval between unsynced-stats notifications
 
 // =============================================================================
 // BLE UUID DEFINITIONS - envsense Protocol
@@ -241,22 +224,22 @@ typedef enum {
 // TIME_SYNC (write): [u64 epoch_ms] -- the app writes this on every connect.
 //
 // SYNC_STATUS (read/notify): [u16 audioFiles][u16 photoFiles][u32 totalBytes][u8 flags]
-#define SYNC_FLAG_SD_OK 0x01      // SD card mounted; SD-first capture is active
+#define SYNC_FLAG_SD_OK 0x01       // SD card mounted; SD-first capture is active
 #define SYNC_FLAG_CLOCK_VALID 0x02 // Device clock has been set since the last power loss
 //
 // SYNC_CONTROL (write): [cmd, ...]
-#define SYNC_CMD_MANIFEST 0x01  // [cmd] -> manifest entries stream over SYNC_DATA
-#define SYNC_CMD_GET_FILE 0x02  // [cmd][u32 fileId] -> file chunks stream over SYNC_DATA
-#define SYNC_CMD_ACK_FILE 0x03  // [cmd][u32 fileId] -> file verified by the app; delete from SD
-#define SYNC_CMD_ABORT 0x04     // [cmd] -> stop the current transfer
-#define SYNC_CMD_PURGE 0x05     // [cmd] -> delete ALL unsynced files without transferring
+#define SYNC_CMD_MANIFEST 0x01 // [cmd] -> manifest entries stream over SYNC_DATA
+#define SYNC_CMD_GET_FILE 0x02 // [cmd][u32 fileId] -> file chunks stream over SYNC_DATA
+#define SYNC_CMD_ACK_FILE 0x03 // [cmd][u32 fileId] -> file verified by the app; delete from SD
+#define SYNC_CMD_ABORT 0x04    // [cmd] -> stop the current transfer
+#define SYNC_CMD_PURGE 0x05    // [cmd] -> delete ALL unsynced files without transferring
 //
 // SYNC_DATA (notify): first byte is the packet type
 #define SYNC_PKT_MANIFEST_END 0x00 // [type][u16 entryCount]
-#define SYNC_PKT_MANIFEST 0x01     // [type][u8 n] then n * ([u32 id][u8 fileType][u32 size][u64 epochMs][u8 orientation])
-#define SYNC_PKT_CHUNK 0x02        // [type][u32 id][u16 seq][payload...]
-#define SYNC_PKT_FILE_END 0x03     // [type][u32 id][u32 crc32(IEEE)]
-#define SYNC_PKT_ERROR 0x7F        // [type][u32 id] -- requested file unavailable
+#define SYNC_PKT_MANIFEST 0x01 // [type][u8 n] then n * ([u32 id][u8 fileType][u32 size][u64 epochMs][u8 orientation])
+#define SYNC_PKT_CHUNK 0x02    // [type][u32 id][u16 seq][payload...]
+#define SYNC_PKT_FILE_END 0x03 // [type][u32 id][u32 crc32(IEEE)]
+#define SYNC_PKT_ERROR 0x7F    // [type][u32 id] -- requested file unavailable
 #define SYNC_MANIFEST_ENTRY_BYTES 18
 #define SYNC_FILE_TYPE_AUDIO 0
 #define SYNC_FILE_TYPE_PHOTO 1
@@ -268,32 +251,32 @@ typedef enum {
 
 // OTA Service UUIDs
 #define OTA_SERVICE_UUID "EA800010-9C72-497F-81F9-752FFE11F565"
-#define OTA_CONTROL_UUID "EA800011-9C72-497F-81F9-752FFE11F565"  // Write commands, read status
-#define OTA_DATA_UUID "EA800012-9C72-497F-81F9-752FFE11F565"     // Notifications for progress
+#define OTA_CONTROL_UUID "EA800011-9C72-497F-81F9-752FFE11F565" // Write commands, read status
+#define OTA_DATA_UUID "EA800012-9C72-497F-81F9-752FFE11F565"    // Notifications for progress
 
 // OTA Commands (written to OTA_CONTROL_UUID)
-#define OTA_CMD_SET_WIFI 0x01       // Set WiFi credentials: [cmd, ssid_len, ssid..., pass_len, pass...]
-#define OTA_CMD_START_OTA 0x02      // Start OTA update: [cmd, url_len, url...]
-#define OTA_CMD_CANCEL_OTA 0x03     // Cancel ongoing OTA
-#define OTA_CMD_GET_STATUS 0x04     // Request current status
-#define OTA_CMD_SET_URL 0x05        // Set firmware URL: [cmd, url_len, url...]
+#define OTA_CMD_SET_WIFI 0x01   // Set WiFi credentials: [cmd, ssid_len, ssid..., pass_len, pass...]
+#define OTA_CMD_START_OTA 0x02  // Start OTA update: [cmd, url_len, url...]
+#define OTA_CMD_CANCEL_OTA 0x03 // Cancel ongoing OTA
+#define OTA_CMD_GET_STATUS 0x04 // Request current status
+#define OTA_CMD_SET_URL 0x05    // Set firmware URL: [cmd, url_len, url...]
 
 // OTA Status codes (notified via OTA_DATA_UUID)
 #define OTA_STATUS_IDLE 0x00
 #define OTA_STATUS_WIFI_CONNECTING 0x10
 #define OTA_STATUS_WIFI_CONNECTED 0x11
 #define OTA_STATUS_WIFI_FAILED 0x12
-#define OTA_STATUS_DOWNLOADING 0x20      // Followed by progress byte (0-100)
+#define OTA_STATUS_DOWNLOADING 0x20 // Followed by progress byte (0-100)
 #define OTA_STATUS_DOWNLOAD_COMPLETE 0x21
 #define OTA_STATUS_DOWNLOAD_FAILED 0x22
-#define OTA_STATUS_INSTALLING 0x30       // Followed by progress byte (0-100)
+#define OTA_STATUS_INSTALLING 0x30 // Followed by progress byte (0-100)
 #define OTA_STATUS_INSTALL_COMPLETE 0x31
 #define OTA_STATUS_INSTALL_FAILED 0x32
 #define OTA_STATUS_REBOOTING 0x40
 #define OTA_STATUS_ERROR 0xFF
 
 // WiFi Configuration
-#define WIFI_CONNECT_TIMEOUT_MS 15000    // 15 seconds to connect
+#define WIFI_CONNECT_TIMEOUT_MS 15000 // 15 seconds to connect
 #define WIFI_MAX_SSID_LEN 32
 #define WIFI_MAX_PASS_LEN 64
 #define OTA_MAX_URL_LEN 256
@@ -335,34 +318,32 @@ typedef enum {
 // LED Status Patterns (in milliseconds)
 #define LED_BOOT_BLINK_FAST 200     // Fast blink during boot
 #define LED_BATTERY_LOW_BLINK 1000  // Slow blink for low battery
-#define LED_SLEEP_BLINK 5000        // Very slow blink in deep sleep mode
 #define LED_PHOTO_CAPTURE_FLASH 100 // Quick flash during photo capture
-
-// Deep Sleep Configuration
-#define DEEP_SLEEP_BUTTON_WAKEUP 1    // Enable button wake-up from deep sleep
-#define POWER_OFF_SLEEP_DELAY_MS 1000 // Delay before entering deep sleep after power off
 
 // =============================================================================
 // TOUCH SENSOR CONFIGURATION - copper foil pad on GPIO3 (D2 / TOUCH3)
 // Hold the foil for TOUCH_HOLD_OFF_MS to power off; touching it again wakes
 // the device from deep sleep (the power button keeps working for both too).
 // =============================================================================
-#define TOUCH_SENSE_PIN 3           // GPIO3 (D2) - copper foil capacitive pad
-#define TOUCH_HOLD_OFF_MS 2000      // Hold duration to power off (same as button long press)
-#define TOUCH_TOUCH_RATIO 0.05f      // Enter touched state when filtered > baseline * (1 + ratio).
-                                     // Kept low because on battery the device ground floats and the
-                                     // touch delta shrinks to a fraction of the USB-powered value.
-#define TOUCH_RELEASE_RATIO 0.025f   // Leave touched state when filtered < baseline * (1 + ratio)
-#define TOUCH_FILTER_SAMPLES 5       // Raw reads per poll; the median rejects single-sample noise
-#define TOUCH_BASELINE_SAMPLES 16    // Boot-time calibration sample count (foil must be untouched)
-#define TOUCH_BASELINE_ALPHA 0.005f  // Baseline EMA rate for downward drift (~10s at 50ms poll)
-#define TOUCH_BASELINE_ALPHA_UP 0.0005f // Upward drift tracked 10x slower so a sub-threshold touch
-                                        // (small battery-powered delta) is not absorbed as baseline
-#define TOUCH_MEASURE_CYCLES 2000    // Touch FSM charge cycles per read (S3 default 500); longer
-                                     // integration = better SNR, which the low thresholds rely on
-#define TOUCH_SLEEP_CYCLES 0x0F      // Interval between HW measurements (S3 default)
-#define TOUCH_SAMPLE_INTERVAL_MS 50  // Polling interval in the main loop
-#define TOUCH_DEBUG_LOG 0            // 1: log raw values every second + LED mirrors touch state (calibration)
+#define TOUCH_SENSE_PIN 3      // GPIO3 (D2) - copper foil capacitive pad
+#define TOUCH_HOLD_OFF_MS 2000 // Hold duration to power off (same as button long press)
+#define TOUCH_TOUCH_RATIO                                                                                              \
+    0.05f                           // Enter touched state when filtered > baseline * (1 + ratio).
+                                    // Kept low because on battery the device ground floats and the
+                                    // touch delta shrinks to a fraction of the USB-powered value.
+#define TOUCH_RELEASE_RATIO 0.025f  // Leave touched state when filtered < baseline * (1 + ratio)
+#define TOUCH_FILTER_SAMPLES 5      // Raw reads per poll; the median rejects single-sample noise
+#define TOUCH_BASELINE_SAMPLES 16   // Boot-time calibration sample count (foil must be untouched)
+#define TOUCH_BASELINE_ALPHA 0.005f // Baseline EMA rate for downward drift (~10s at 50ms poll)
+#define TOUCH_BASELINE_ALPHA_UP                                                                                        \
+    0.0005f // Upward drift tracked 10x slower so a sub-threshold touch
+            // (small battery-powered delta) is not absorbed as baseline
+#define TOUCH_MEASURE_CYCLES                                                                                           \
+    2000                            // Touch FSM charge cycles per read (S3 default 500); longer
+                                    // integration = better SNR, which the low thresholds rely on
+#define TOUCH_SLEEP_CYCLES 0x0F     // Interval between HW measurements (S3 default)
+#define TOUCH_SAMPLE_INTERVAL_MS 50 // Polling interval in the main loop
+#define TOUCH_DEBUG_LOG 0           // 1: log raw values every second + LED mirrors touch state (calibration)
 
 // Power Button States
 typedef enum { BUTTON_IDLE, BUTTON_PRESSED, BUTTON_LONG_PRESS, BUTTON_RELEASED } button_state_t;
@@ -375,8 +356,7 @@ typedef enum {
     LED_NORMAL_OPERATION,
     LED_LOW_BATTERY,
     LED_PHOTO_CAPTURE,
-    LED_POWER_OFF_SEQUENCE,
-    LED_SLEEP_MODE
+    LED_POWER_OFF_SEQUENCE
 } led_status_t;
 
 // Device Power States
@@ -385,8 +365,7 @@ typedef enum {
     DEVICE_ACTIVE,
     DEVICE_POWER_SAVE,
     DEVICE_LOW_BATTERY,
-    DEVICE_POWERING_OFF,
-    DEVICE_SLEEP
+    DEVICE_POWERING_OFF
 } device_state_t;
 
 #endif // CONFIG_H

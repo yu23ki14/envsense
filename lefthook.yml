@@ -7,6 +7,12 @@ pre-commit:
       glob: "*.{js,jsx,ts,tsx,json,jsonc}"
       run: pnpm exec biome check --write --no-errors-on-unmatched {staged_files}
       stage_fixed: true
+    clang-format:
+      # firmware C/C++ — clang-format is pinned via @wasm-fmt/clang-format
+      # (uses firmware/.clang-format). Only staged files are reformatted.
+      glob: "firmware/**/*.{c,cpp,cc,h,hpp,ino}"
+      run: pnpm exec clang-format -i {staged_files}
+      stage_fixed: true
     typecheck:
       glob: "*.{ts,tsx}"
       run: pnpm run typecheck

@@ -16,6 +16,9 @@ importers:
       '@biomejs/biome':
         specifier: 2.4.15
         version: 2.4.15
+      '@wasm-fmt/clang-format':
+        specifier: 22.1.7
+        version: 22.1.7
       lefthook:
         specifier: 2.1.8
         version: 2.1.8
@@ -1736,6 +1739,11 @@ packages:
 
   '@urql/exchange-retry@1.2.0':
     resolution: {integrity: sha512-1O/biKiVhhn0EtvDF4UOvz325K4RrLupfL8rHcmqD2TBLv4qVDWQuzx4JGa1FfqjjRb+C9TNZ6w19f32Mq85Ug==}
+
+  '@wasm-fmt/clang-format@22.1.7':
+    resolution: {integrity: sha512-nq3v7UcZnANCXmrxInOfQxySoSfbalcrMiG9VHxa6OMW5AR1ZHggm9jWRlCJOpLrmt5R1l+IxyHzRU7+NeU6QA==}
+    engines: {node: '>=16.17.0'}
+    hasBin: true
 
   '@xmldom/xmldom@0.7.13':
     resolution: {integrity: sha512-lm2GW5PkosIzccsaZIz7tp8cPADSIlIHWDFTR1N0SzfinhhYgeIQjFMz4rYzanCScr3DqQLeomUDArp6MWKm+g==}
@@ -6818,6 +6826,8 @@ snapshots:
       wonka: 6.3.6
     transitivePeerDependencies:
       - graphql
+
+  '@wasm-fmt/clang-format@22.1.7': {}
 
   '@xmldom/xmldom@0.7.13': {}
 

@@ -1,7 +1,7 @@
 #include "opus_encoder.h"
 
-#include <opus.h>
 #include <esp_heap_caps.h>
+#include <opus.h>
 
 #include "config.h"
 
@@ -28,14 +28,14 @@ bool opus_encoder_init()
     Serial.println("Initializing Opus encoder...");
 
     // Allocate buffers in PSRAM
-    pcm_ring_buffer = (int16_t *)heap_caps_malloc(AUDIO_RING_BUFFER_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    pcm_ring_buffer = (int16_t *) heap_caps_malloc(AUDIO_RING_BUFFER_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     if (pcm_ring_buffer == nullptr) {
         Serial.println("Failed to allocate PCM ring buffer in PSRAM");
         return false;
     }
     Serial.println("PCM ring buffer allocated in PSRAM");
 
-    opus_output_buffer = (uint8_t *)heap_caps_malloc(OPUS_OUTPUT_MAX_BYTES, MALLOC_CAP_SPIRAM);
+    opus_output_buffer = (uint8_t *) heap_caps_malloc(OPUS_OUTPUT_MAX_BYTES, MALLOC_CAP_SPIRAM);
     if (opus_output_buffer == nullptr) {
         Serial.println("Failed to allocate opus output buffer in PSRAM");
         heap_caps_free(pcm_ring_buffer);
@@ -43,7 +43,7 @@ bool opus_encoder_init()
         return false;
     }
 
-    opus_input_buffer = (int16_t *)heap_caps_malloc(OPUS_FRAME_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    opus_input_buffer = (int16_t *) heap_caps_malloc(OPUS_FRAME_SAMPLES * sizeof(int16_t), MALLOC_CAP_SPIRAM);
     if (opus_input_buffer == nullptr) {
         Serial.println("Failed to allocate opus input buffer in PSRAM");
         heap_caps_free(pcm_ring_buffer);
@@ -85,7 +85,8 @@ bool opus_encoder_init()
     Serial.println("Opus encoder initialized successfully");
     Serial.printf("  Sample rate: %d Hz\n", MIC_SAMPLE_RATE);
     Serial.printf("  Bitrate: %d bps\n", OPUS_BITRATE);
-    Serial.printf("  Frame size: %d samples (%d ms)\n", OPUS_FRAME_SAMPLES, OPUS_FRAME_SAMPLES * 1000 / MIC_SAMPLE_RATE);
+    Serial.printf(
+        "  Frame size: %d samples (%d ms)\n", OPUS_FRAME_SAMPLES, OPUS_FRAME_SAMPLES * 1000 / MIC_SAMPLE_RATE);
 
     return true;
 }

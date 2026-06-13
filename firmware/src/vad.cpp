@@ -102,8 +102,10 @@ static void processFrame(int16_t *frame)
         debugMaxEnergy = energy;
     }
     if (millis() - debugLastLog >= 1000) {
-        Serial.printf("vad: peak frame energy %lu (threshold %d, %s)\n", (unsigned long) debugMaxEnergy,
-                      VAD_THRESHOLD, speaking ? "speaking" : "silent");
+        Serial.printf("vad: peak frame energy %lu (threshold %d, %s)\n",
+                      (unsigned long) debugMaxEnergy,
+                      VAD_THRESHOLD,
+                      speaking ? "speaking" : "silent");
         debugMaxEnergy = 0;
         debugLastLog = millis();
     }

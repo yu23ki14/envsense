@@ -118,7 +118,9 @@ bool storage_init()
 
     sdAvailable = true;
     Serial.printf("storage: SD mounted (%llu MB), unsynced: %u audio / %u photo / %lu bytes\n",
-                  SD.cardSize() / (1024ULL * 1024ULL), audioFileCount, photoFileCount,
+                  SD.cardSize() / (1024ULL * 1024ULL),
+                  audioFileCount,
+                  photoFileCount,
                   (unsigned long) unsyncedBytes);
     return true;
 }
@@ -156,7 +158,11 @@ static void correctDirTimestamps(const char *dir, int64_t deltaMs)
             continue; // Open file: renamed on close via utterancePendingDelta
         }
         const char *suffix = strchr(name, '_') != nullptr ? strchr(name, '_') : strchr(name, '.');
-        snprintf(newPath, sizeof(newPath), "%s/%llu%s", dir, (unsigned long long) (epoch + deltaMs),
+        snprintf(newPath,
+                 sizeof(newPath),
+                 "%s/%llu%s",
+                 dir,
+                 (unsigned long long) (epoch + deltaMs),
                  suffix != nullptr ? suffix : "");
         SD.rename(oldPath, newPath);
     }
@@ -263,7 +269,9 @@ void storage_audio_end_utterance()
     utteranceFile.close();
     if (utterancePendingDelta != 0) {
         char newPath[64];
-        snprintf(newPath, sizeof(newPath), AUDIO_DIR "/%llu.opp",
+        snprintf(newPath,
+                 sizeof(newPath),
+                 AUDIO_DIR "/%llu.opp",
                  (unsigned long long) ((int64_t) utteranceStartEpochMs + utterancePendingDelta));
         SD.rename(utterancePath, newPath);
         utterancePendingDelta = 0;
@@ -272,7 +280,8 @@ void storage_audio_end_utterance()
     utteranceOpen = false;
     audioFileCount++;
     unsyncedBytes += utteranceBytes;
-    Serial.printf("storage: utterance closed (%lu frames, %lu bytes)\n", (unsigned long) utteranceFrames,
+    Serial.printf("storage: utterance closed (%lu frames, %lu bytes)\n",
+                  (unsigned long) utteranceFrames,
                   (unsigned long) utteranceBytes);
 }
 
@@ -289,8 +298,8 @@ bool storage_save_photo(const uint8_t *jpeg, size_t len, uint8_t orientation)
         return false;
     }
     char path[64];
-    snprintf(path, sizeof(path), PHOTO_DIR "/%llu_%u.jpg", (unsigned long long) storage_now_ms(),
-             (unsigned) orientation);
+    snprintf(
+        path, sizeof(path), PHOTO_DIR "/%llu_%u.jpg", (unsigned long long) storage_now_ms(), (unsigned) orientation);
     lock();
     File f = SD.open(path, FILE_WRITE);
     if (!f) {

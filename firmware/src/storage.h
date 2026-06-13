@@ -13,10 +13,10 @@
 // call in safely.
 
 typedef struct {
-    uint32_t id;        // Connection-scoped id assigned at manifest build time
-    uint8_t type;       // SYNC_FILE_TYPE_AUDIO / SYNC_FILE_TYPE_PHOTO
-    uint32_t size;      // File size in bytes
-    uint64_t epochMs;   // Capture start time
+    uint32_t id;         // Connection-scoped id assigned at manifest build time
+    uint8_t type;        // SYNC_FILE_TYPE_AUDIO / SYNC_FILE_TYPE_PHOTO
+    uint32_t size;       // File size in bytes
+    uint64_t epochMs;    // Capture start time
     uint8_t orientation; // Photos only (image_orientation_t); 0 for audio
     char path[48];
 } manifest_entry_t;

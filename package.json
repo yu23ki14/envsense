@@ -18,10 +18,12 @@
     "lint": "biome lint .",
     "format": "biome format --write .",
     "check": "biome check --write .",
+    "format:firmware": "clang-format -i firmware/src/*.cpp firmware/src/*.h",
     "prepare": "lefthook install"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.15",
+    "@wasm-fmt/clang-format": "22.1.7",
     "lefthook": "2.1.8"
   }
 }
