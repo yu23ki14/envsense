@@ -12,6 +12,7 @@ import { beginBackgroundWork } from './backgroundWork';
 import type { BleDevice } from './ble';
 import {
   type DeviceSyncStatus,
+  deleteAllDeviceFiles,
   ENVSENSE_SERVICE_UUID,
   parseSyncStatus,
   runDeviceSync,
@@ -27,6 +28,9 @@ export type DeviceSyncState = {
   progress: SyncProgress | null;
   error: string | null;
   startSync: () => Promise<void>;
+  /** 転送せずにデバイス上の未同期ファイルを全消去する。 */
+  deleteAll: () => Promise<void>;
+  deleting: boolean;
 };
 
 export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
@@ -34,6 +38,7 @@ export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
   const [syncing, setSyncing] = useState(false);
   const [progress, setProgress] = useState<SyncProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     setStatus(null);
@@ -95,8 +100,26 @@ export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
     }
   }, [device, syncing]);
 
+  const deleteAll = useCallback(async () => {
+    if (device == null || syncing || deleting) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await deleteAllDeviceFiles(device);
+      const service = await device.getService(ENVSENSE_SERVICE_UUID);
+      const char = await service.getCharacteristic(SYNC_STATUS_UUID);
+      const parsed = parseSyncStatus(await char.read());
+      if (parsed != null) setStatus(parsed);
+    } catch (err) {
+      console.warn('Delete-all failed', err);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setDeleting(false);
+    }
+  }, [device, syncing, deleting]);
+
   return useMemo(
-    () => ({ status, syncing, progress, error, startSync }),
-    [status, syncing, progress, error, startSync],
+    () => ({ status, syncing, progress, error, startSync, deleteAll, deleting }),
+    [status, syncing, progress, error, startSync, deleteAll, deleting],
   );
 }

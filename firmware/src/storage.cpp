@@ -403,6 +403,56 @@ bool storage_delete_file(const char *path, uint8_t type, uint32_t size)
     return ok;
 }
 
+// Delete every file in `dir`, skipping the currently-open utterance. Only
+// entries already returned by openNextFile() are removed, which is safe to do
+// mid-iteration (readdir does not revisit them). Returns the count removed.
+static int deleteAllInDir(const char *dir)
+{
+    File root = SD.open(dir);
+    if (!root) {
+        return 0;
+    }
+    int removed = 0;
+    for (File f = root.openNextFile(); f; f = root.openNextFile()) {
+        if (f.isDirectory()) {
+            f.close();
+            continue;
+        }
+        char path[64];
+        snprintf(path, sizeof(path), "%s/%s", dir, f.name());
+        f.close();
+        if (utteranceOpen && strcmp(path, utterancePath) == 0) {
+            continue; // Still recording into this one; leave it for the next sync.
+        }
+        if (SD.remove(path)) {
+            removed++;
+        }
+    }
+    root.close();
+    return removed;
+}
+
+int storage_delete_all()
+{
+    if (!sdAvailable) {
+        return 0;
+    }
+    lock();
+    if (readFile) { // Cached read handle may point at a file we are about to drop.
+        readFile.close();
+        readPath[0] = '\0';
+    }
+    int removed = deleteAllInDir(AUDIO_DIR) + deleteAllInDir(PHOTO_DIR);
+    // Recompute from disk so the open utterance (if any) is still accounted for.
+    audioFileCount = 0;
+    photoFileCount = 0;
+    unsyncedBytes = 0;
+    scanDir(AUDIO_DIR, &audioFileCount, &unsyncedBytes);
+    scanDir(PHOTO_DIR, &photoFileCount, &unsyncedBytes);
+    unlock();
+    return removed;
+}
+
 void storage_stats(uint16_t *audioCount, uint16_t *photoCount, uint32_t *totalBytes)
 {
     *audioCount = audioFileCount;

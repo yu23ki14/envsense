@@ -53,6 +53,10 @@ int storage_build_manifest(manifest_entry_t *entries, int maxEntries);
 // The transfer CRC32 is accumulated by the caller as it streams chunks.
 int storage_read_file(const char *path, uint32_t offset, uint8_t *buf, size_t len);
 bool storage_delete_file(const char *path, uint8_t type, uint32_t size);
+// Deletes every unsynced file (audio + photo) without transferring, skipping
+// the currently-open utterance. Returns the number of files removed and resets
+// the unsynced counters.
+int storage_delete_all();
 void storage_stats(uint16_t *audioCount, uint16_t *photoCount, uint32_t *totalBytes);
 
 // Flush pending buffers and unmount (called before deep sleep).

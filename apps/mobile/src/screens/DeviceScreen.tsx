@@ -110,6 +110,7 @@ export function DeviceScreen() {
   const [languageModalOpen, setLanguageModalOpen] = useState(false);
   const [powerAction, setPowerAction] = useState<'sleep' | 'reboot' | null>(null);
   const [powerBusy, setPowerBusy] = useState(false);
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false);
   const selectedModelId = localModelIdOf(settings.audio.transcriptionModel);
   const selectedSummaryModelId = localModelIdOf(settings.summary.model);
 
@@ -226,12 +227,22 @@ export function DeviceScreen() {
                     </View>
                   </>
                 ) : (
-                  <Button
-                    onPress={sync.startSync}
-                    iconLeft={<Icon name="cloud" size={16} color="onPrimary" />}
-                  >
-                    {`同期する（${unsyncedFiles} 件 · ${formatBytes(sync.status?.totalBytes ?? 0)}）`}
-                  </Button>
+                  <>
+                    <Button
+                      onPress={sync.startSync}
+                      iconLeft={<Icon name="cloud" size={16} color="onPrimary" />}
+                    >
+                      {`同期する（${unsyncedFiles} 件 · ${formatBytes(sync.status?.totalBytes ?? 0)}）`}
+                    </Button>
+                    <Button
+                      variant="text"
+                      onPress={() => setDeleteAllOpen(true)}
+                      loading={sync.deleting}
+                      iconLeft={<Icon name="trash" size={16} color="error" />}
+                    >
+                      同期せずすべて削除
+                    </Button>
+                  </>
                 )}
                 {sync.error != null && !sync.syncing ? (
                   <Text variant="caption" color="error">
@@ -508,6 +519,21 @@ export function DeviceScreen() {
         busy={powerBusy}
         onConfirm={runPowerAction}
         onClose={() => setPowerAction(null)}
+      />
+
+      <ConfirmModal
+        visible={deleteAllOpen}
+        title="未同期データをすべて削除しますか？"
+        message={`デバイス上の未同期ファイル ${unsyncedFiles ?? 0} 件（${formatBytes(
+          sync.status?.totalBytes ?? 0,
+        )}）を転送せずに完全に削除します。この操作は取り消せません。`}
+        confirmLabel="すべて削除"
+        busy={sync.deleting}
+        onConfirm={async () => {
+          await sync.deleteAll();
+          setDeleteAllOpen(false);
+        }}
+        onClose={() => setDeleteAllOpen(false)}
       />
     </ClipScreen>
   );

@@ -193,8 +193,15 @@ typedef enum {
 // SYNC TRANSFER - bulk file transfer to the app over BLE (see SYNC_* UUIDs)
 // =============================================================================
 #define SYNC_MANIFEST_MAX_ENTRIES 2048 // Manifest table in PSRAM (~1 day of photos + utterances)
-#define SYNC_CHUNKS_PER_LOOP 16        // File chunks sent per loop_app() pass (keeps touch/button responsive)
-#define SYNC_CHUNK_DELAY_MS 3          // Pause between chunk notifications so the BLE stack can flush
+#define SYNC_CHUNKS_PER_LOOP 16        // Max file chunks attempted per loop_app() pass (keeps touch/button responsive)
+#define SYNC_CHUNK_DELAY_MS 1          // Pause between chunk notifications so the BLE stack can flush
+#define SYNC_CONGESTION_BACKOFF_MS 5   // Wait after a notify is rejected (TX buffer full) before resending — under one connection interval so throughput stays high
+// Fast connection interval requested on connect (units of 1.25 ms). A short
+// interval lets the central poll often, which is the main lever for bulk-sync
+// throughput; both iOS and Android honor a reasonable request.
+#define SYNC_CONN_INTERVAL_MIN 6       // 7.5 ms
+#define SYNC_CONN_INTERVAL_MAX 12      // 15 ms
+#define SYNC_CONN_SUPERVISION_TIMEOUT 400 // 4 s
 #define SYNC_STATUS_INTERVAL_MS 10000  // Min interval between unsynced-stats notifications
 
 // =============================================================================
@@ -242,6 +249,7 @@ typedef enum {
 #define SYNC_CMD_GET_FILE 0x02  // [cmd][u32 fileId] -> file chunks stream over SYNC_DATA
 #define SYNC_CMD_ACK_FILE 0x03  // [cmd][u32 fileId] -> file verified by the app; delete from SD
 #define SYNC_CMD_ABORT 0x04     // [cmd] -> stop the current transfer
+#define SYNC_CMD_PURGE 0x05     // [cmd] -> delete ALL unsynced files without transferring
 //
 // SYNC_DATA (notify): first byte is the packet type
 #define SYNC_PKT_MANIFEST_END 0x00 // [type][u16 entryCount]

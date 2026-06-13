@@ -152,6 +152,7 @@ static volatile bool syncManifestRequested = false;
 static volatile bool syncFileRequested = false;
 static volatile uint32_t syncRequestedFileId = 0;
 static volatile bool syncAbortRequested = false;
+static volatile bool syncPurgeRequested = false;
 static volatile uint32_t syncAckQueue[8];
 static volatile uint8_t syncAckHead = 0;
 static volatile uint8_t syncAckTail = 0;
@@ -165,6 +166,10 @@ static uint32_t syncFileOffset = 0;
 static uint16_t syncFileSeq = 0;
 static uint32_t syncFileCrc = 0;
 static uint8_t syncTxBuffer[BLE_MTU_SIZE];
+// Set by SyncDataStatusCallback when a notify is rejected because the
+// controller TX buffer is full. notify() reports this synchronously via
+// onStatus(ERROR_GATT), so processSync() can read it right after notify().
+static volatile bool syncTxFull = false;
 
 // -------------------------------------------------------------------------
 // Camera Frame
@@ -839,6 +844,15 @@ class ServerHandler : public BLEServerCallbacks
         updateSyncStatus(true);
         publishCaptureMode(true);
     }
+    void onConnect(BLEServer *server, esp_ble_gatts_cb_param_t *param) override
+    {
+        // Ask the central for a short connection interval. This is the main
+        // lever for bulk-sync throughput: with the BLE-default ~30-50 ms
+        // interval the controller sends only a couple of notifications per
+        // event, so a multi-MB transfer takes many minutes.
+        server->updateConnParams(param->connect.remote_bda, SYNC_CONN_INTERVAL_MIN,
+                                 SYNC_CONN_INTERVAL_MAX, 0, SYNC_CONN_SUPERVISION_TIMEOUT);
+    }
     void onDisconnect(BLEServer *server) override
     {
         connected = false;
@@ -972,6 +986,24 @@ class SyncControlCallback : public BLECharacteristicCallbacks
         case SYNC_CMD_ABORT:
             syncAbortRequested = true;
             break;
+        case SYNC_CMD_PURGE:
+            syncPurgeRequested = true;
+            break;
+        }
+    }
+};
+
+// Flow control for the sync data stream. The standard BLE notify() silently
+// drops a packet when the controller TX buffer is full (rc != ESP_OK), which
+// used to corrupt transfers: a dropped FILE_END left the app waiting until its
+// per-file timeout, and a dropped chunk broke the sequence. We catch that here
+// so processSync() only advances after a notify is actually accepted.
+class SyncDataStatusCallback : public BLECharacteristicCallbacks
+{
+    void onStatus(BLECharacteristic *characteristic, Status s, uint32_t code) override
+    {
+        if (s == Status::ERROR_GATT) {
+            syncTxFull = true;
         }
     }
 };
@@ -1145,6 +1177,19 @@ static void syncSendFileError(uint32_t id)
     syncDataCharacteristic->notify();
 }
 
+// Notify the current syncTxBuffer contents and report whether the BLE stack
+// accepted the packet. notify() invokes SyncDataStatusCallback synchronously,
+// so syncTxFull reflects this exact packet by the time notify() returns. A
+// false return means the TX buffer was full and the packet was dropped — the
+// caller must back off and resend the same packet without advancing state.
+static bool syncNotify(size_t len)
+{
+    syncTxFull = false;
+    syncDataCharacteristic->setValue(syncTxBuffer, len);
+    syncDataCharacteristic->notify();
+    return !syncTxFull;
+}
+
 // Drives the sync transfer a bounded amount per loop_app() pass so the touch
 // sensor / button / photo capture stay responsive during multi-minute syncs.
 void processSync(unsigned long now)
@@ -1163,6 +1208,19 @@ void processSync(unsigned long now)
         timeSyncPending = false;
         storage_set_time(timeSyncValue);
         updateSyncStatus(true); // Clock-valid flag changed
+    }
+
+    // Delete-all: drop the backlog without transferring it. Cancels any
+    // in-flight transfer first; manifest ids are invalidated so the app
+    // re-requests on its next sync.
+    if (syncPurgeRequested) {
+        syncPurgeRequested = false;
+        syncState = SYNC_IDLE;
+        syncFile = nullptr;
+        syncManifestBuilt = false;
+        int removed = storage_delete_all();
+        Serial.printf("sync: purged %d files\n", removed);
+        updateSyncStatus(true);
     }
 
     if (!connected || syncDataCharacteristic == nullptr) {
@@ -1220,8 +1278,10 @@ void processSync(unsigned long now)
                 syncTxBuffer[0] = SYNC_PKT_MANIFEST_END;
                 uint16_t count = (uint16_t) syncManifestCount;
                 memcpy(&syncTxBuffer[1], &count, 2);
-                syncDataCharacteristic->setValue(syncTxBuffer, 3);
-                syncDataCharacteristic->notify();
+                if (!syncNotify(3)) {
+                    delay(SYNC_CONGESTION_BACKOFF_MS); // resend MANIFEST_END next pass
+                    break;
+                }
                 syncState = SYNC_IDLE;
                 break;
             }
@@ -1241,9 +1301,11 @@ void processSync(unsigned long now)
                 syncTxBuffer[pos + 17] = e->orientation;
                 pos += SYNC_MANIFEST_ENTRY_BYTES;
             }
+            if (!syncNotify(pos)) {
+                delay(SYNC_CONGESTION_BACKOFF_MS); // dropped: resend this batch (index not advanced)
+                break;
+            }
             syncManifestSendIndex += n;
-            syncDataCharacteristic->setValue(syncTxBuffer, pos);
-            syncDataCharacteristic->notify();
             delay(SYNC_CHUNK_DELAY_MS);
         }
         lastActivity = now;
@@ -1257,8 +1319,10 @@ void processSync(unsigned long now)
                 syncTxBuffer[0] = SYNC_PKT_FILE_END;
                 memcpy(&syncTxBuffer[1], &syncFile->id, 4);
                 memcpy(&syncTxBuffer[5], &syncFileCrc, 4);
-                syncDataCharacteristic->setValue(syncTxBuffer, 9);
-                syncDataCharacteristic->notify();
+                if (!syncNotify(9)) {
+                    delay(SYNC_CONGESTION_BACKOFF_MS); // resend FILE_END next pass
+                    break;
+                }
                 Serial.printf("sync: file %lu sent (%lu bytes)\n", (unsigned long) syncFile->id,
                               (unsigned long) syncFile->size);
                 syncFile = nullptr;
@@ -1275,9 +1339,13 @@ void processSync(unsigned long now)
             syncTxBuffer[0] = SYNC_PKT_CHUNK;
             memcpy(&syncTxBuffer[1], &syncFile->id, 4);
             memcpy(&syncTxBuffer[5], &syncFileSeq, 2);
+            if (!syncNotify(7 + n)) {
+                // Dropped by a full TX buffer: leave offset/seq/CRC untouched so
+                // the same chunk re-reads and resends next pass (no data loss).
+                delay(SYNC_CONGESTION_BACKOFF_MS);
+                break;
+            }
             syncFileCrc = esp_rom_crc32_le(syncFileCrc, &syncTxBuffer[7], n);
-            syncDataCharacteristic->setValue(syncTxBuffer, 7 + n);
-            syncDataCharacteristic->notify();
             syncFileOffset += n;
             syncFileSeq++;
             delay(SYNC_CHUNK_DELAY_MS);
@@ -1299,8 +1367,12 @@ void configure_ble()
     BLEServer *server = BLEDevice::createServer();
     server->setCallbacks(new ServerHandler());
 
-    // Main service
-    BLEService *service = server->createService(serviceUUID);
+    // Main service. The default numHandles (15) is far too small for this
+    // service: 10 characteristics + 5 CCCD descriptors + the service entry
+    // need 26 handles, so without an explicit count the later characteristics
+    // (sync status/control/data, time sync, mode control) silently fail to
+    // register and the app sees "Characteristic not found". Pad for headroom.
+    BLEService *service = server->createService(serviceUUID, 40);
 
     // Audio Data characteristic (for streaming audio to app)
     audioDataCharacteristic = service->createCharacteristic(
@@ -1350,6 +1422,7 @@ void configure_ble()
     BLE2902 *syncDataCcc = new BLE2902();
     syncDataCcc->setNotifications(true);
     syncDataCharacteristic->addDescriptor(syncDataCcc);
+    syncDataCharacteristic->setCallbacks(new SyncDataStatusCallback());
 
     // Time Sync characteristic (the app writes epoch ms on every connect)
     timeSyncCharacteristic = service->createCharacteristic(timeSyncUUID, BLECharacteristic::PROPERTY_WRITE);

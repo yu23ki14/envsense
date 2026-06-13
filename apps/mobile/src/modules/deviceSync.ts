@@ -20,6 +20,7 @@ const SYNC_CMD_MANIFEST = 0x01;
 const SYNC_CMD_GET_FILE = 0x02;
 const SYNC_CMD_ACK_FILE = 0x03;
 const SYNC_CMD_ABORT = 0x04;
+const SYNC_CMD_PURGE = 0x05;
 
 const SYNC_PKT_MANIFEST_END = 0x00;
 const SYNC_PKT_MANIFEST = 0x01;
@@ -119,6 +120,31 @@ export async function writeTimeSync(device: BleDevice): Promise<void> {
     epoch = Math.floor(epoch / 256);
   }
   await char.write(payload);
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * デバイス上の未同期ファイルを転送せずに全消去する（SYNC_CMD_PURGE）。ファーム側の
+ * 削除は同期的で確実だが、UI フィードバックのため SYNC_STATUS を読み、件数が 0 まで
+ * 減るか（録音中の発話ファイルが残る場合は）下げ止まるまで待ってから解決する。
+ */
+export async function deleteAllDeviceFiles(device: BleDevice): Promise<void> {
+  const service = await device.getService(ENVSENSE_SERVICE_UUID);
+  const control = await service.getCharacteristic(SYNC_CONTROL_UUID);
+  const statusChar = await service.getCharacteristic(SYNC_STATUS_UUID);
+  await control.write(controlPacket(SYNC_CMD_PURGE));
+  let previous = -1;
+  for (let i = 0; i < 16; i++) {
+    await sleep(300);
+    const status = parseSyncStatus(await statusChar.read());
+    const total = status != null ? status.audioFiles + status.photoFiles : -1;
+    if (total === 0) return;
+    if (total >= 0 && total === previous) return; // Settled (e.g. an open utterance remains).
+    previous = total;
+  }
+  // The firmware purge is synchronous, so the files are gone regardless of a
+  // slow status read — don't surface a hard error for the confirmation poll.
 }
 
 function controlPacket(cmd: number, fileId?: number): Uint8Array {
