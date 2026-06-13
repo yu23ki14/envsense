@@ -12,8 +12,18 @@ export type WhisperSegment = { text?: string };
 const HAS_SPEECH_CHAR = /[a-z0-9぀-ヿ一-鿿가-힯]/i;
 // Only drop these exact phrases (case/punctuation-insensitive) — they're the
 // hallucinations Whisper emits on silence here. Keep the list tight so real
-// short utterances aren't lost.
-const HALLUCINATION_PHRASES = new Set(['thankyou', 'okay']);
+// short utterances aren't lost. The Japanese entries are the YouTube-style
+// sign-offs Whisper hallucinates over silence ("ご視聴ありがとうございました"
+// など); we keep the ご視聴/ご清聴 variants but deliberately *not* bare
+// "ありがとうございました", which is a real utterance.
+const HALLUCINATION_PHRASES = new Set([
+  'thankyou',
+  'okay',
+  'ご視聴ありがとうございました',
+  'ご視聴ありがとうございます',
+  'ご清聴ありがとうございました',
+  'ご清聴ありがとうございます',
+]);
 
 function normalizePhrase(text: string): string {
   return text.toLowerCase().replace(/[^a-z0-9぀-ヿ一-鿿가-힯]/gi, '');
