@@ -26,8 +26,11 @@ board: `XIAO_ESP32S3` / framework: `arduino` / PSRAM: `opi`（有効）。
 ```bash
 arduino-cli config add board_manager.additional_urls \
   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-arduino-cli core install esp32:esp32@2.0.17
+arduino-cli core install esp32:esp32@3.3.8
 ```
+
+> core 3.x が必須。esp_vad（esp-sr）の同梱・I2S 新ドライバ（`i2s_pdm`）・IDF 5.5 を前提にしている。
+> 2.0.17 からの主な移行点は BLE（NimBLE バックエンド化）・I2S（`i2s_pdm`）・touch（IDF legacy `touch_pad_*`）。
 
 ### Opus ライブラリのインストール
 
@@ -38,7 +41,8 @@ git clone https://github.com/pschatzmann/arduino-libopus.git
 git clone https://github.com/pschatzmann/arduino-audio-tools.git
 ```
 
-NimBLE-Arduino / esp32-camera は ESP32 ボード定義に含まれる。
+esp-sr（esp_vad）・esp32-camera は ESP32 ボード定義(core 3.x)に同梱。BLE はコア同梱ライブラリの
+NimBLE バックエンドを使用する（core 3.x の ESP32-S3 既定が NimBLE のため、Bluedroid 依存コードは不可）。
 
 ## ブートローダーモードへの入り方
 

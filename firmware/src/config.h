@@ -142,14 +142,18 @@ typedef enum {
 // =============================================================================
 // VAD (Voice Activity Detection) - silence is neither encoded nor stored
 // =============================================================================
-// Energy VAD over 20ms PCM frames (after MIC_GAIN). The threshold is the mean
-// absolute amplitude of a frame; tune on-device with VAD_DEBUG_LOG if speech
-// is clipped or noise leaks through.
-#define VAD_THRESHOLD 500    // Mean |amplitude| (int16, DC-removed) above which a frame is voiced
+// esp-sr's WebRTC-derived esp_vad judges each 20ms PCM frame on spectral
+// features rather than bare energy, so stationary room noise no longer reads as
+// speech the way the old mean|amplitude| threshold did. VAD_MODE 0..4 trades
+// sensitivity for noise rejection (0 = normal/flags more speech, 4 = very
+// aggressive/rejects more, may clip quiet onsets). The trigger-frame count and
+// 1s pre-roll below already protect onsets, so a higher mode is fairly safe;
+// raise it if noise still leaks, lower it if quiet speech gets dropped.
+#define VAD_MODE 2           // esp_vad aggressiveness 0..4 (higher = more noise rejection)
 #define VAD_TRIGGER_FRAMES 2 // Consecutive voiced frames to start an utterance (40ms)
 #define VAD_HANGOVER_MS 2000 // Silence that ends an utterance (bridges normal speech pauses)
 #define VAD_PREROLL_MS 1000  // PCM kept before the trigger so speech onsets aren't clipped
-#define VAD_DEBUG_LOG 0      // 1: log per-second frame energy for threshold calibration
+#define VAD_DEBUG_LOG 0      // 1: log per-second VAD state for mode tuning
 
 // =============================================================================
 // MICROSD STORAGE - SD-first capture (XIAO ESP32S3 Sense expansion board)

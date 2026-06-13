@@ -1,6 +1,5 @@
 #include "app.h"
 
-#include <BLE2902.h>
 #include <BLEAdvertisedDevice.h>
 #include <BLEDevice.h>
 #include <BLEScan.h>
@@ -9,6 +8,7 @@
 
 #include "config.h" // Use config.h for all configurations
 #include "driver/rtc_io.h"
+#include "driver/touch_sensor.h" // IDF legacy touch_pad_* (Arduino touch HAL removed on S3 in IDF 5.5; v2 driver migration tracked in #72)
 #include "esp_camera.h"
 #include "esp_rom_crc.h"
 #include "esp_sleep.h"
@@ -335,13 +335,23 @@ static inline uint32_t touchOffThreshold()
     return (uint32_t) (touchBaseline * (1.0f + TOUCH_RELEASE_RATIO));
 }
 
+// One raw capacitance read of the foil channel via the IDF legacy driver. On
+// the ESP32-S3 the channel id equals the GPIO number, so TOUCH_SENSE_PIN (GPIO3)
+// is TOUCH_PAD_NUM3. A touch raises the value, matching the old touchRead scale.
+static uint32_t touchReadRaw()
+{
+    uint32_t raw = 0;
+    touch_pad_read_raw_data((touch_pad_t) TOUCH_SENSE_PIN, &raw);
+    return raw;
+}
+
 // Median of TOUCH_FILTER_SAMPLES raw reads; on battery power single samples
 // spike too much (camera / BLE load on the supply rail) to act on directly.
 static uint32_t touchReadFiltered()
 {
     uint32_t s[TOUCH_FILTER_SAMPLES];
     for (int i = 0; i < TOUCH_FILTER_SAMPLES; i++) {
-        s[i] = touchRead(TOUCH_SENSE_PIN);
+        s[i] = touchReadRaw();
     }
     // Insertion sort - the array is tiny
     for (int i = 1; i < TOUCH_FILTER_SAMPLES; i++) {
@@ -358,9 +368,17 @@ static uint32_t touchReadFiltered()
 
 void setupTouch()
 {
-    // Longer charge integration than the default for a better SNR; required
-    // for the low thresholds that battery-powered (floating-ground) touch needs
-    touchSetCycles(TOUCH_MEASURE_CYCLES, TOUCH_SLEEP_CYCLES);
+    // IDF 5.5 removed the Arduino touch HAL on the ESP32-S3, so drive the copper
+    // foil through the IDF legacy touch_pad_* driver. Longer charge integration
+    // than the default gives a better SNR, required for the low thresholds that
+    // battery-powered (floating-ground) touch needs.
+    touch_pad_init();
+    touch_pad_set_fsm_mode(TOUCH_FSM_MODE_TIMER);
+    touch_pad_config((touch_pad_t) TOUCH_SENSE_PIN);
+    touch_pad_set_charge_discharge_times(TOUCH_MEASURE_CYCLES);
+    touch_pad_set_measurement_interval(TOUCH_SLEEP_CYCLES);
+    touch_pad_fsm_start();
+    delay(10); // Let the FSM complete a few measurements before the first read
 
     if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TOUCHPAD && touchBaseline > 0) {
         // Woken by the foil: keep the baseline stored in RTC memory and ignore
@@ -369,11 +387,11 @@ void setupTouch()
     } else {
         // Cold boot or button wake: calibrate assuming the foil is untouched.
         for (int i = 0; i < 4; i++) {
-            touchRead(TOUCH_SENSE_PIN); // Discard warm-up readings
+            touchReadRaw(); // Discard warm-up readings
         }
         uint64_t sum = 0;
         for (int i = 0; i < TOUCH_BASELINE_SAMPLES; i++) {
-            sum += touchRead(TOUCH_SENSE_PIN);
+            sum += touchReadRaw();
             delay(10);
         }
         touchBaseline = (uint32_t) (sum / TOUCH_BASELINE_SAMPLES);
@@ -498,8 +516,16 @@ void shutdownDevice()
     rtc_gpio_pulldown_dis((gpio_num_t) POWER_BUTTON_PIN);
     esp_sleep_enable_ext1_wakeup(1ULL << POWER_BUTTON_PIN, ESP_EXT1_WAKEUP_ALL_LOW);
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
-    // Wake when the foil's raw value rises this much above the sleep benchmark
-    touchSleepWakeUpEnable(TOUCH_SENSE_PIN, (uint32_t) (touchBaseline * TOUCH_TOUCH_RATIO));
+    // Wake when the foil's reading rises far enough above its benchmark. The
+    // IDF sleep threshold is a *delta above the hardware-tracked benchmark*
+    // (touch_pad_set_thresh: "the original value of the trigger state minus the
+    // benchmark"), not an absolute level like the in-loop detector's
+    // touchOnThreshold(). So pass baseline * ratio (the rise a touch produces),
+    // not baseline * (1 + ratio) -- the latter is ~baseline counts and a finger
+    // never lifts the reading that far, so the device would never wake.
+    touch_pad_sleep_channel_enable((touch_pad_t) TOUCH_SENSE_PIN, true);
+    touch_pad_sleep_set_threshold((touch_pad_t) TOUCH_SENSE_PIN, (uint32_t) (touchBaseline * TOUCH_TOUCH_RATIO));
+    esp_sleep_enable_touchpad_wakeup();
     Serial.println("Entering deep sleep...");
     delay(100);
     esp_deep_sleep_start();
@@ -572,7 +598,7 @@ void onMicData(int16_t *data, size_t samples)
 {
     // The VAD decides what reaches the encoder: silence stays in its pre-roll
     // ring and is never encoded or stored.
-    vad_process(data, samples);
+    vad_feed(data, samples);
 }
 
 // Voiced PCM only (pre-roll flush + live frames while speaking).
@@ -759,17 +785,14 @@ class ServerHandler : public BLEServerCallbacks
         updateSyncStatus(true);
         publishCaptureMode(true);
     }
-    void onConnect(BLEServer *server, esp_ble_gatts_cb_param_t *param) override
+    void onConnect(BLEServer *server, ble_gap_conn_desc *desc) override
     {
         // Ask the central for a short connection interval. This is the main
         // lever for bulk-sync throughput: with the BLE-default ~30-50 ms
         // interval the controller sends only a couple of notifications per
         // event, so a multi-MB transfer takes many minutes.
-        server->updateConnParams(param->connect.remote_bda,
-                                 SYNC_CONN_INTERVAL_MIN,
-                                 SYNC_CONN_INTERVAL_MAX,
-                                 0,
-                                 SYNC_CONN_SUPERVISION_TIMEOUT);
+        server->requestConnParams(
+            desc->conn_handle, SYNC_CONN_INTERVAL_MIN, SYNC_CONN_INTERVAL_MAX, 0, SYNC_CONN_SUPERVISION_TIMEOUT);
     }
     void onDisconnect(BLEServer *server) override
     {
@@ -782,29 +805,10 @@ class ServerHandler : public BLEServerCallbacks
         Serial.println("<<< BLE Client disconnected. Restarting advertising.");
         BLEDevice::startAdvertising();
     }
-    void onMtuChanged(BLEServer *server, esp_ble_gatts_cb_param_t *param) override
+    void onMtuChanged(BLEServer *server, ble_gap_conn_desc *desc, uint16_t mtu) override
     {
-        negotiatedMtu = param->mtu.mtu;
+        negotiatedMtu = mtu;
         Serial.printf("MTU negotiated: %u\n", negotiatedMtu);
-    }
-};
-
-// Callback for Audio Data CCCD (Client Characteristic Configuration Descriptor)
-class AudioCCCDCallback : public BLEDescriptorCallbacks
-{
-    void onWrite(BLEDescriptor *pDescriptor)
-    {
-        uint8_t *value = pDescriptor->getValue();
-        if (value && pDescriptor->getLength() >= 2) {
-            // Check notification bit (bit 0)
-            if (value[0] & 0x01) {
-                audioSubscribed = true;
-                Serial.println("Audio notifications enabled");
-            } else {
-                audioSubscribed = false;
-                Serial.println("Audio notifications disabled");
-            }
-        }
     }
 };
 
@@ -820,6 +824,14 @@ class AudioDataCallback : public BLECharacteristicCallbacks
     void onRead(BLECharacteristic *pCharacteristic)
     {
         // Client read the characteristic
+    }
+
+    // NimBLE reports CCCD subscribe/unsubscribe here (the 0x2902 descriptor is
+    // auto-created and has no separate write callback). bit0 = notifications.
+    void onSubscribe(BLECharacteristic *pCharacteristic, ble_gap_conn_desc *desc, uint16_t subValue) override
+    {
+        audioSubscribed = (subValue & 0x0001) != 0;
+        Serial.println(audioSubscribed ? "Audio notifications enabled" : "Audio notifications disabled");
     }
 };
 
@@ -937,23 +949,6 @@ class TimeSyncCallback : public BLECharacteristicCallbacks
         }
         timeSyncValue = epochMs;
         timeSyncPending = true; // Applied in loop_app: may rename files on SD
-    }
-};
-
-class OTAControlCallback : public BLECharacteristicCallbacks
-{
-    void onWrite(BLECharacteristic *pChar) override
-    {
-        std::string value = pChar->getValue();
-        if (value.length() > 0) {
-            ota_handle_command((uint8_t *) value.data(), value.length());
-        }
-    }
-
-    void onRead(BLECharacteristic *pChar) override
-    {
-        uint8_t status[2] = {ota_get_status(), 0};
-        pChar->setValue(status, 2);
     }
 };
 
@@ -1290,10 +1285,6 @@ void configure_ble()
     // Audio Data characteristic (for streaming audio to app)
     audioDataCharacteristic = service->createCharacteristic(
         audioDataUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-    BLE2902 *audioCcc = new BLE2902();
-    audioCcc->setNotifications(true);
-    audioCcc->setCallbacks(new AudioCCCDCallback());
-    audioDataCharacteristic->addDescriptor(audioCcc);
     audioDataCharacteristic->setCallbacks(new AudioDataCallback());
 
     // Audio Codec characteristic (tells app which codec we're using)
@@ -1304,9 +1295,6 @@ void configure_ble()
     // Photo Data characteristic
     photoDataCharacteristic = service->createCharacteristic(
         photoDataUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-    BLE2902 *ccc = new BLE2902();
-    ccc->setNotifications(true);
-    photoDataCharacteristic->addDescriptor(ccc);
 
     // Photo Control characteristic
     photoControlCharacteristic = service->createCharacteristic(photoControlUUID, BLECharacteristic::PROPERTY_WRITE);
@@ -1321,9 +1309,6 @@ void configure_ble()
     // Sync Status characteristic (unsynced file counts + flags)
     syncStatusCharacteristic = service->createCharacteristic(
         syncStatusUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-    BLE2902 *syncStatusCcc = new BLE2902();
-    syncStatusCcc->setNotifications(true);
-    syncStatusCharacteristic->addDescriptor(syncStatusCcc);
 
     // Sync Control characteristic (manifest / file requests, acks, abort)
     syncControlCharacteristic = service->createCharacteristic(syncControlUUID, BLECharacteristic::PROPERTY_WRITE);
@@ -1332,9 +1317,6 @@ void configure_ble()
     // Sync Data characteristic (manifest entries + file chunks)
     syncDataCharacteristic = service->createCharacteristic(
         syncDataUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-    BLE2902 *syncDataCcc = new BLE2902();
-    syncDataCcc->setNotifications(true);
-    syncDataCharacteristic->addDescriptor(syncDataCcc);
     syncDataCharacteristic->setCallbacks(new SyncDataStatusCallback());
 
     // Time Sync characteristic (the app writes epoch ms on every connect)
@@ -1347,9 +1329,6 @@ void configure_ble()
     modeControlCharacteristic = service->createCharacteristic(
         modeControlUUID,
         BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_NOTIFY);
-    BLE2902 *modeCcc = new BLE2902();
-    modeCcc->setNotifications(true);
-    modeControlCharacteristic->addDescriptor(modeCcc);
     modeControlCharacteristic->setCallbacks(new ModeControlCallback());
     uint8_t initialMode = captureMode;
     modeControlCharacteristic->setValue(&initialMode, 1);
@@ -1360,9 +1339,6 @@ void configure_ble()
     BLEService *batteryService = server->createService(BATTERY_SERVICE_UUID);
     batteryLevelCharacteristic = batteryService->createCharacteristic(
         BATTERY_LEVEL_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-    BLE2902 *batteryCcc = new BLE2902();
-    batteryCcc->setNotifications(true);
-    batteryLevelCharacteristic->addDescriptor(batteryCcc);
 
     // Set initial battery level
     readBatteryLevel();
@@ -1399,14 +1375,12 @@ void configure_ble()
     // OTA Control characteristic (for receiving commands and reading status)
     otaControlCharacteristic = otaService->createCharacteristic(
         otaControlUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
-    otaControlCharacteristic->setCallbacks(new OTAControlCallback());
+    // The OTA control callback lives in ota.cpp and is attached by
+    // ota_set_characteristics() below (single definition, avoids an ODR clash).
 
     // OTA Data characteristic (for progress notifications)
     otaDataCharacteristic = otaService->createCharacteristic(
         otaDataUUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-    BLE2902 *otaCcc = new BLE2902();
-    otaCcc->setNotifications(true);
-    otaDataCharacteristic->addDescriptor(otaCcc);
 
     // Set OTA characteristics for the OTA module
     ota_set_characteristics(otaControlCharacteristic, otaDataCharacteristic);

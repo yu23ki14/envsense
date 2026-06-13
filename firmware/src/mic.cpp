@@ -1,16 +1,14 @@
 #include "mic.h"
 
-#include <driver/i2s.h>
+#include <driver/i2s_pdm.h>
 
 #include "config.h"
-
-// I2S configuration for PDM microphone
-#define I2S_PORT I2S_NUM_0
 
 // Static variables
 static volatile bool mic_running = false;
 static mic_data_handler audio_callback = nullptr;
 static int16_t *i2s_read_buffer = nullptr;
+static i2s_chan_handle_t rx_handle = nullptr;
 
 bool mic_start()
 {
@@ -41,45 +39,46 @@ bool mic_start()
         }
     }
 
-    // I2S configuration for PDM microphone
-    i2s_config_t i2s_config = {
-        .mode = (i2s_mode_t) (I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_PDM),
-        .sample_rate = MIC_SAMPLE_RATE,
-        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-        .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
-        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-        .dma_buf_count = 8,
-        .dma_buf_len = 256,
-        .use_apll = false,
-        .tx_desc_auto_clear = false,
-        .fixed_mclk = 0,
-    };
-
-    // I2S pin configuration for XIAO ESP32S3 Sense PDM microphone
-    i2s_pin_config_t pin_config = {
-        .bck_io_num = I2S_PIN_NO_CHANGE,
-        .ws_io_num = MIC_CLK_PIN, // PDM CLK
-        .data_out_num = I2S_PIN_NO_CHANGE,
-        .data_in_num = MIC_DATA_PIN, // PDM DATA
-    };
-
-    // Install and configure I2S driver
-    esp_err_t err = i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+    // Create an RX channel on I2S0 in master mode (new esp_driver_i2s API).
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    esp_err_t err = i2s_new_channel(&chan_cfg, nullptr, &rx_handle);
     if (err != ESP_OK) {
-        Serial.printf("Failed to install I2S driver: %s\n", esp_err_to_name(err));
+        Serial.printf("Failed to create I2S channel: %s\n", esp_err_to_name(err));
         return false;
     }
 
-    err = i2s_set_pin(I2S_PORT, &pin_config);
+    // PDM RX: 16kHz, 16-bit, mono. The default slot config enables the
+    // hardware high-pass filter (hp_en); the software DC blocker in
+    // mic_process() stays as a belt-and-braces guard.
+    i2s_pdm_rx_config_t pdm_rx_cfg = {
+        .clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(MIC_SAMPLE_RATE),
+        .slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO),
+        .gpio_cfg =
+            {
+                .clk = (gpio_num_t) MIC_CLK_PIN,  // PDM CLK
+                .din = (gpio_num_t) MIC_DATA_PIN, // PDM DATA
+                .invert_flags =
+                    {
+                        .clk_inv = false,
+                    },
+            },
+    };
+
+    err = i2s_channel_init_pdm_rx_mode(rx_handle, &pdm_rx_cfg);
     if (err != ESP_OK) {
-        Serial.printf("Failed to set I2S pins: %s\n", esp_err_to_name(err));
-        i2s_driver_uninstall(I2S_PORT);
+        Serial.printf("Failed to init I2S PDM RX: %s\n", esp_err_to_name(err));
+        i2s_del_channel(rx_handle);
+        rx_handle = nullptr;
         return false;
     }
 
-    // Clear DMA buffers
-    i2s_zero_dma_buffer(I2S_PORT);
+    err = i2s_channel_enable(rx_handle);
+    if (err != ESP_OK) {
+        Serial.printf("Failed to enable I2S channel: %s\n", esp_err_to_name(err));
+        i2s_del_channel(rx_handle);
+        rx_handle = nullptr;
+        return false;
+    }
 
     mic_running = true;
     Serial.println("Microphone started successfully");
@@ -94,8 +93,11 @@ void mic_stop()
 
     Serial.println("Stopping microphone...");
 
-    i2s_stop(I2S_PORT);
-    i2s_driver_uninstall(I2S_PORT);
+    if (rx_handle != nullptr) {
+        i2s_channel_disable(rx_handle);
+        i2s_del_channel(rx_handle);
+        rx_handle = nullptr;
+    }
 
     mic_running = false;
     Serial.println("Microphone stopped");
@@ -113,25 +115,23 @@ void mic_set_callback(mic_data_handler callback)
 
 void mic_process()
 {
-    if (!mic_running || i2s_read_buffer == nullptr) {
+    if (!mic_running || i2s_read_buffer == nullptr || rx_handle == nullptr) {
         return;
     }
 
     size_t bytes_read = 0;
-    esp_err_t err =
-        i2s_read(I2S_PORT, i2s_read_buffer, MIC_BUFFER_SAMPLES * sizeof(int16_t), &bytes_read, pdMS_TO_TICKS(20));
+    // New driver: timeout is in milliseconds (not FreeRTOS ticks).
+    esp_err_t err = i2s_channel_read(rx_handle, i2s_read_buffer, MIC_BUFFER_SAMPLES * sizeof(int16_t), &bytes_read, 20);
 
     if (err == ESP_OK && bytes_read > 0) {
         size_t samples_read = bytes_read / sizeof(int16_t);
 
         // Remove the PDM mic's DC bias, then apply gain. The bias is large
-        // (~1900 raw, ~7500 after gain) and must go before anything downstream:
-        // the energy VAD judges mean|amplitude|, so an uncorrected pedestal
-        // reads as "always voiced" and the gate never closes (it records
-        // continuous silence). A one-pole DC blocker (y = x - x[-1] + R*y[-1])
-        // high-passes it out; doing it pre-gain also stops the bias from
-        // eating positive headroom and clipping asymmetrically. State persists
-        // across calls so block boundaries don't thump.
+        // (~1900 raw, ~7500 after gain) and is removed before anything
+        // downstream so it doesn't eat positive headroom and clip the waveform
+        // asymmetrically (which would also skew what the VAD and Opus encoder
+        // see). A one-pole DC blocker (y = x - x[-1] + R*y[-1]) high-passes it
+        // out; State persists across calls so block boundaries don't thump.
         static float dcPrevIn = 0.0f;
         static float dcPrevOut = 0.0f;
         for (size_t i = 0; i < samples_read; i++) {

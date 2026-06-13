@@ -1,6 +1,5 @@
 #include "ota.h"
 
-#include <BLE2902.h>
 #include <HTTPClient.h>
 #include <Update.h>
 #include <WiFi.h>
@@ -40,9 +39,9 @@ class OTAControlCallback : public BLECharacteristicCallbacks
 {
     void onWrite(BLECharacteristic *pCharacteristic) override
     {
-        std::string value = pCharacteristic->getValue();
+        String value = pCharacteristic->getValue();
         if (value.length() > 0) {
-            ota_handle_command((uint8_t *) value.data(), value.length());
+            ota_handle_command((uint8_t *) value.c_str(), value.length());
         }
     }
 
@@ -58,6 +57,10 @@ void ota_set_characteristics(BLECharacteristic *controlChar, BLECharacteristic *
 {
     otaControlCharacteristic = controlChar;
     otaDataCharacteristic = dataChar;
+    // Attach the control callback here (not in app.cpp) so OTAControlCallback
+    // has a single definition; a duplicate file-scope class with a diverging
+    // onRead would be an ODR violation and the linker could pick either body.
+    controlChar->setCallbacks(new OTAControlCallback());
 }
 
 void ota_handle_command(uint8_t *data, size_t length)

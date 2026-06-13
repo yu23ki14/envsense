@@ -1,8 +1,9 @@
 #include "vad.h"
 
 #include "config.h"
+#include "esp_vad.h"
 
-#define VAD_FRAME_SAMPLES OPUS_FRAME_SAMPLES // 20ms @ 16kHz; energy is judged per Opus frame
+#define VAD_FRAME_SAMPLES OPUS_FRAME_SAMPLES // 20ms @ 16kHz; one esp_vad frame
 #define VAD_FRAME_MS (VAD_FRAME_SAMPLES * 1000 / MIC_SAMPLE_RATE)
 #define VAD_HANGOVER_FRAMES (VAD_HANGOVER_MS / VAD_FRAME_MS)
 #define VAD_PREROLL_SAMPLES (MIC_SAMPLE_RATE * VAD_PREROLL_MS / 1000)
@@ -10,13 +11,16 @@
 static vad_pcm_handler pcmCallback = nullptr;
 static vad_state_handler stateCallback = nullptr;
 
+// esp-sr WebRTC VAD instance; judges each 20ms frame on spectral features.
+static vad_handle_t vadHandle = nullptr;
+
 // Pre-roll ring (PSRAM): the most recent VAD_PREROLL_MS of PCM while silent.
 static int16_t *preroll = nullptr;
 static size_t prerollWrite = 0;
 static size_t prerollCount = 0;
 
-// Incoming PCM arrives in mic-buffer-sized blocks (100ms); energy is computed
-// per 20ms frame, so partial frames carry over between calls.
+// Incoming PCM arrives in mic-buffer-sized blocks (100ms); esp_vad judges one
+// 20ms frame at a time, so partial frames carry over between calls.
 static int16_t frameBuf[VAD_FRAME_SAMPLES];
 static size_t framePos = 0;
 
@@ -25,7 +29,6 @@ static uint32_t voicedRun = 0;
 static uint32_t silentRun = 0;
 
 #if VAD_DEBUG_LOG
-static uint32_t debugMaxEnergy = 0;
 static unsigned long debugLastLog = 0;
 #endif
 
@@ -38,6 +41,12 @@ bool vad_init()
     }
     prerollWrite = 0;
     prerollCount = 0;
+
+    vadHandle = vad_create((vad_mode_t) VAD_MODE);
+    if (vadHandle == nullptr) {
+        Serial.println("vad: failed to create esp_vad instance");
+        return false;
+    }
     return true;
 }
 
@@ -91,27 +100,14 @@ static void prerollFlush()
 
 static void processFrame(int16_t *frame)
 {
-    uint32_t sum = 0;
-    for (size_t i = 0; i < VAD_FRAME_SAMPLES; i++) {
-        sum += (uint32_t) abs((int32_t) frame[i]);
-    }
-    uint32_t energy = sum / VAD_FRAME_SAMPLES;
+    bool voiced = vad_process(vadHandle, frame, MIC_SAMPLE_RATE, VAD_FRAME_MS) == VAD_SPEECH;
 
 #if VAD_DEBUG_LOG
-    if (energy > debugMaxEnergy) {
-        debugMaxEnergy = energy;
-    }
     if (millis() - debugLastLog >= 1000) {
-        Serial.printf("vad: peak frame energy %lu (threshold %d, %s)\n",
-                      (unsigned long) debugMaxEnergy,
-                      VAD_THRESHOLD,
-                      speaking ? "speaking" : "silent");
-        debugMaxEnergy = 0;
+        Serial.printf("vad: %s (mode %d)\n", voiced ? "voiced" : "silent", VAD_MODE);
         debugLastLog = millis();
     }
 #endif
-
-    bool voiced = energy >= VAD_THRESHOLD;
 
     if (!speaking) {
         if (voiced) {
@@ -150,7 +146,7 @@ static void processFrame(int16_t *frame)
     }
 }
 
-void vad_process(int16_t *data, size_t samples)
+void vad_feed(int16_t *data, size_t samples)
 {
     if (preroll == nullptr) {
         return;

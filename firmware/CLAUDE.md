@@ -13,8 +13,14 @@ One-time setup — install the ESP32 board package:
 ```bash
 arduino-cli config add board_manager.additional_urls \
   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-arduino-cli core install esp32:esp32@2.0.17
+arduino-cli core install esp32:esp32@3.3.8
 ```
+
+Core 3.x is required: it bundles esp-sr (the `esp_vad` VAD) and the new `i2s_pdm` driver, and
+runs ESP-IDF 5.5. On the ESP32-S3 the bundled BLE library defaults to the **NimBLE** backend
+(Bluedroid-specific APIs won't compile), and the Arduino touch HAL is gone — touch uses the IDF
+legacy `touch_pad_*` driver. See `src/vad.cpp` (esp_vad), `src/mic.cpp` (i2s_pdm), and the BLE /
+touch code in `src/app.cpp`.
 
 Opus support requires cloning these into the Arduino `libraries/` folder:
 
