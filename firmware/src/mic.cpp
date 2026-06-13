@@ -124,17 +124,28 @@ void mic_process()
     if (err == ESP_OK && bytes_read > 0) {
         size_t samples_read = bytes_read / sizeof(int16_t);
 
-        // Apply gain if needed
-        if (MIC_GAIN != 1) {
-            for (size_t i = 0; i < samples_read; i++) {
-                int32_t sample = (int32_t) i2s_read_buffer[i] * MIC_GAIN;
-                // Clamp to 16-bit range
-                if (sample > 32767)
-                    sample = 32767;
-                if (sample < -32768)
-                    sample = -32768;
-                i2s_read_buffer[i] = (int16_t) sample;
-            }
+        // Remove the PDM mic's DC bias, then apply gain. The bias is large
+        // (~1900 raw, ~7500 after gain) and must go before anything downstream:
+        // the energy VAD judges mean|amplitude|, so an uncorrected pedestal
+        // reads as "always voiced" and the gate never closes (it records
+        // continuous silence). A one-pole DC blocker (y = x - x[-1] + R*y[-1])
+        // high-passes it out; doing it pre-gain also stops the bias from
+        // eating positive headroom and clipping asymmetrically. State persists
+        // across calls so block boundaries don't thump.
+        static float dcPrevIn = 0.0f;
+        static float dcPrevOut = 0.0f;
+        for (size_t i = 0; i < samples_read; i++) {
+            float in = (float) i2s_read_buffer[i];
+            float out = in - dcPrevIn + MIC_DC_BLOCK_POLE * dcPrevOut;
+            dcPrevIn = in;
+            dcPrevOut = out;
+            int32_t sample = (int32_t) (out * MIC_GAIN);
+            // Clamp to 16-bit range
+            if (sample > 32767)
+                sample = 32767;
+            if (sample < -32768)
+                sample = -32768;
+            i2s_read_buffer[i] = (int16_t) sample;
         }
 
         if (audio_callback != nullptr) {

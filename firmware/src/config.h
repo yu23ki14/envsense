@@ -134,6 +134,11 @@ typedef enum {
 #define MIC_SAMPLE_RATE 16000          // 16kHz sample rate
 #define MIC_BUFFER_SAMPLES 1600        // 100ms buffer (16000 * 0.1)
 #define MIC_GAIN 4                     // Microphone gain multiplier (clamped to int16 in mic.cpp)
+// One-pole DC blocker applied in mic_process before gain. The PDM mic sits on a
+// large DC pedestal (~1900 raw); left in, the energy VAD reads it as permanent
+// speech. Closer to 1.0 = lower corner frequency; 0.995 @ 16kHz ≈ 13Hz, well
+// below speech so it only strips the bias/sub-sonic rumble.
+#define MIC_DC_BLOCK_POLE 0.995f
 // Must hold the VAD pre-roll flush (1s) plus live PCM headroom: when speech
 // starts, vad.cpp dumps VAD_PREROLL_MS of buffered samples into this ring at
 // once, before opus_process() drains it.
@@ -159,9 +164,9 @@ typedef enum {
 // Energy VAD over 20ms PCM frames (after MIC_GAIN). The threshold is the mean
 // absolute amplitude of a frame; tune on-device with VAD_DEBUG_LOG if speech
 // is clipped or noise leaks through.
-#define VAD_THRESHOLD 700           // Mean |amplitude| (int16) above which a frame is voiced
+#define VAD_THRESHOLD 500           // Mean |amplitude| (int16, DC-removed) above which a frame is voiced
 #define VAD_TRIGGER_FRAMES 2        // Consecutive voiced frames to start an utterance (40ms)
-#define VAD_HANGOVER_MS 5000        // Silence that ends an utterance (bridges normal speech pauses)
+#define VAD_HANGOVER_MS 2000        // Silence that ends an utterance (bridges normal speech pauses)
 #define VAD_PREROLL_MS 1000         // PCM kept before the trigger so speech onsets aren't clipped
 #define VAD_DEBUG_LOG 0             // 1: log per-second frame energy for threshold calibration
 
