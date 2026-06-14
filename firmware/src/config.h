@@ -149,9 +149,9 @@ typedef enum {
 // aggressive/rejects more, may clip quiet onsets). The trigger-frame count and
 // 1s pre-roll below already protect onsets, so a higher mode is fairly safe;
 // raise it if noise still leaks, lower it if quiet speech gets dropped.
-#define VAD_MODE 2           // esp_vad aggressiveness 0..4 (higher = more noise rejection)
-#define VAD_TRIGGER_FRAMES 2 // Consecutive voiced frames to start an utterance (40ms)
-#define VAD_HANGOVER_MS 2000 // Silence that ends an utterance (bridges normal speech pauses)
+#define VAD_MODE 3           // esp_vad aggressiveness 0..4 (higher = more noise rejection)
+#define VAD_TRIGGER_FRAMES 4 // Consecutive voiced frames to start an utterance (80ms; rejects short noise bursts)
+#define VAD_HANGOVER_MS 1200 // Silence that ends an utterance (bridges normal speech pauses)
 #define VAD_PREROLL_MS 1000  // PCM kept before the trigger so speech onsets aren't clipped
 #define VAD_DEBUG_LOG 0      // 1: log per-second VAD state for mode tuning
 
