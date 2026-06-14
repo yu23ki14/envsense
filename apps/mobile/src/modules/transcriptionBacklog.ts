@@ -18,6 +18,7 @@ import {
 } from '../data';
 import { beginBackgroundWork } from './backgroundWork';
 import { transcribe } from './llm';
+import { denoisedWavFor } from './transcriptionDenoise';
 
 /** ライブの ingest キューと再開処理が同じレコードを二重実行しないための排他。 */
 const inFlight = new Set<string>();
@@ -30,8 +31,12 @@ const inFlight = new Set<string>();
 export async function transcribePending(pending: PendingTranscription): Promise<void> {
   if (inFlight.has(pending.id)) return;
   inFlight.add(pending.id);
+  // STT 入力だけノイズ低減した一時 WAV を作って転写に渡す（native のみ。web /
+  // 失敗時は null で元の Ogg をそのまま転写）。durable な pending Ogg は無改変なので
+  // 再開時もこの一時 WAV が作り直されるだけで、耐障害性は変わらない。
+  const denoisedPath = await denoisedWavFor(pending.filePath);
   try {
-    const { text, model } = await transcribe(pending.filePath);
+    const { text, model } = await transcribe(denoisedPath ?? pending.filePath);
     if (text.length > 0) {
       saveAudioChunk({
         id: pending.id,
@@ -47,6 +52,7 @@ export async function transcribePending(pending: PendingTranscription): Promise<
   } catch (err) {
     console.warn(`Transcription failed for ${pending.id} (kept for resume)`, err);
   } finally {
+    if (denoisedPath != null) deleteFile(denoisedPath);
     inFlight.delete(pending.id);
   }
 }

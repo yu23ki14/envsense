@@ -8,6 +8,7 @@ import {
 } from 'react-native-litert-lm';
 import { absoluteUri, deleteFile, writeBytes } from '../../../../data';
 import { mmkv } from '../../../../data/storage/mmkv';
+import { floatToWav } from '../../../audioPcm';
 import { ModelUnavailableError } from '../../types';
 import type { WhisperEngine, WhisperEngineResult } from './types';
 
@@ -113,36 +114,6 @@ async function ensureLoaded(modelId: string): Promise<LiteRTLMInstance> {
   return m;
 }
 
-/** Float32[-1,1] → 16bit mono WAV のバイト列。 */
-function floatToWav(pcm: Float32Array, sampleRate: number): Uint8Array {
-  const dataLen = pcm.length * 2;
-  const buffer = new ArrayBuffer(44 + dataLen);
-  const view = new DataView(buffer);
-  const str = (o: number, s: string) => {
-    for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i));
-  };
-  str(0, 'RIFF');
-  view.setUint32(4, 36 + dataLen, true);
-  str(8, 'WAVE');
-  str(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM
-  view.setUint16(22, 1, true); // mono
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  str(36, 'data');
-  view.setUint32(40, dataLen, true);
-  let o = 44;
-  for (let i = 0; i < pcm.length; i++) {
-    const s = Math.max(-1, Math.min(1, pcm[i]));
-    view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
-    o += 2;
-  }
-  return new Uint8Array(buffer);
-}
-
 function transcriptionPrompt(language?: string): string {
   const lang = language === 'ja' ? '音声は日本語です。' : '';
   return `次の音声を逐語で文字起こししてください。${lang}文字起こしのテキストだけを出力し、説明や前置きは付けないでください。`;
@@ -159,7 +130,8 @@ async function transcribeFile(
   // 触るため `size() can only be accessed synchronously on the JS Thread` で落ちる。
   console.info(`[litert] decode start: ${relativePath}`);
   const audio = await decodeAudioData(absoluteUri(relativePath), SAMPLE_RATE);
-  const wavRel = relativePath.replace(/\.ogg$/, '.wav');
+  // Distinct temp name so a `.wav` input (the denoised STT file) isn't clobbered.
+  const wavRel = `${relativePath.replace(/\.[^./]+$/, '')}.litert.wav`;
   writeBytes(wavRel, floatToWav(audio.getChannelData(0), audio.sampleRate));
   const wavPath = absoluteUri(wavRel).replace('file://', '');
 
