@@ -20,18 +20,17 @@ export const GROQ_WHISPER_REF = 'groq:whisper-large-v3-turbo';
  * is multipart/form-data, so `fetch` derives the boundary itself.
  */
 async function transcribeWithGroq(relativePath: string, language?: string): Promise<string> {
-  // The transcription stage may hand us a denoised WAV instead of the raw Ogg, so
-  // derive the upload name/MIME from the extension (both are accepted by Whisper).
-  const isWav = relativePath.endsWith('.wav');
-  const fileName = isWav ? 'audio.wav' : 'audio.ogg';
-  const mimeType = isWav ? 'audio/wav' : 'audio/ogg';
   const form = new FormData();
   if (Platform.OS === 'web') {
     const bytes = await readBytes(relativePath);
     if (bytes == null) throw new Error(`Audio file not found: ${relativePath}`);
-    form.append('file', new Blob([bytes.buffer as ArrayBuffer], { type: mimeType }), fileName);
+    form.append(
+      'file',
+      new Blob([bytes.buffer as ArrayBuffer], { type: 'audio/ogg' }),
+      'audio.ogg',
+    );
   } else {
-    const part = { uri: absoluteUri(relativePath), name: fileName, type: mimeType };
+    const part = { uri: absoluteUri(relativePath), name: 'audio.ogg', type: 'audio/ogg' };
     // biome-ignore lint/suspicious/noExplicitAny: RN's file part shape isn't a Blob
     form.append('file', part as any);
   }
