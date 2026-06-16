@@ -6,6 +6,10 @@ import { speechText, type WhisperSegment } from './speech';
 
 const GROQ_TRANSCRIPTION_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_WHISPER_MODEL = 'whisper-large-v3-turbo';
+// RN の fetch は既定で無期限。通信が「切れも返りもしない」無応答に陥ると 1 件で
+// キュー全体が永久停止するため（issue #74）、上限を設けて abort し、失敗扱いで
+// 次のセグメントへ進める（その 1 件は pending として再開対象に残る）。
+const GROQ_TRANSCRIPTION_TIMEOUT_MS = 60_000;
 
 /** catalog / settings に保存する安定 ref。 */
 export const GROQ_WHISPER_REF = 'groq:whisper-large-v3-turbo';
@@ -42,13 +46,21 @@ async function transcribeWithGroq(relativePath: string, language?: string): Prom
     form.append('language', language);
   }
 
-  const response = await fetch(GROQ_TRANSCRIPTION_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${await getGroqApiKey()}`,
-    },
-    body: form,
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GROQ_TRANSCRIPTION_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(GROQ_TRANSCRIPTION_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${await getGroqApiKey()}`,
+      },
+      body: form,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
     throw new Error(`Groq transcription failed: ${response.status} ${detail}`.trim());

@@ -226,8 +226,8 @@ function stagePendingTranscription(
  * セッションへ振り分けて追記し、文字起こしをキューに積む。
  *
  * セッション分割（日付変更 / SESSION_GAP_MS 超の間隔）はライブと同期で同一
- * ロジック。文字起こしは転送と並行しつつ 1 件ずつ直列実行され、`flush()` で
- * 完了を待てる。
+ * ロジック。文字起こしは転送と並行しつつ 1 件ずつ直列実行され、`flush()` は
+ * その完了を待たずにバックグラウンドへ委ねる（issue #74）。
  */
 export class AudioSessionIngestor {
   private active: AudioSession | null = null;
@@ -267,12 +267,19 @@ export class AudioSessionIngestor {
       .finally(endWork);
   }
 
-  /** アクティブセッションを閉じ、積まれた文字起こしの完了を待つ。 */
+  /**
+   * アクティブセッションを閉じる。積まれた文字起こしキューは **待たない**。
+   *
+   * 文字起こしは各セグメントが個別に張る beginBackgroundWork（ingestSegment）で
+   * バックグラウンド継続し、未処理分は再開バナー / DeviceProvider の起動時
+   * 自動再開（resumePendingTranscriptions）に委ねる。同期完了を全件の文字起こし
+   * 完了に待たせると、大量バックログや 1 件の通信無応答で同期 UI が固まるため
+   * （issue #74）、ここではセッション確定だけを行う。
+   */
   async flush(): Promise<void> {
     if (this.active != null) {
       finalizeSession(this.active);
       this.active = null;
     }
-    await this.transcriptionQueue;
   }
 }
