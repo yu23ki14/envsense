@@ -18,11 +18,6 @@
 #include "storage.h"
 #include "vad.h"
 
-// Battery state
-float batteryVoltage = 0.0f;
-int batteryPercentage = 0;
-unsigned long lastBatteryCheck = 0;
-
 // Device power state
 bool deviceActive = true;
 device_state_t deviceState = DEVICE_BOOTING;
@@ -76,7 +71,6 @@ static BLEUUID otaDataUUID(OTA_DATA_UUID);
 BLECharacteristic *photoDataCharacteristic;
 BLECharacteristic *photoControlCharacteristic;
 BLECharacteristic *powerControlCharacteristic;
-BLECharacteristic *batteryLevelCharacteristic;
 BLECharacteristic *audioDataCharacteristic;
 BLECharacteristic *audioCodecCharacteristic;
 BLECharacteristic *otaControlCharacteristic;
@@ -144,8 +138,17 @@ static sync_state_t syncState = SYNC_IDLE;
 static volatile bool syncManifestRequested = false;
 static volatile bool syncFileRequested = false;
 static volatile uint32_t syncRequestedFileId = 0;
+// Resume support: where in the file the app wants the transfer to start, and the
+// app's running CRC32 over the bytes it already holds (both 0 for a fresh fetch).
+static volatile uint32_t syncRequestedOffset = 0;
+static volatile uint32_t syncRequestedCrc = 0;
 static volatile bool syncAbortRequested = false;
 static volatile bool syncPurgeRequested = false;
+// Incremental delete-all: once requested, the backlog is drained a batch per
+// loop pass so the BLE link stays serviced and SYNC_STATUS reports shrinking
+// counts (the app renders a progress bar off the decreasing total).
+static bool syncPurgeActive = false;
+static uint32_t syncPurgeRemoved = 0;
 static volatile uint32_t syncAckQueue[8];
 static volatile uint8_t syncAckHead = 0;
 static volatile uint8_t syncAckTail = 0;
@@ -164,16 +167,43 @@ static uint8_t syncTxBuffer[BLE_MTU_SIZE];
 // onStatus(ERROR_GATT), so processSync() can read it right after notify().
 static volatile bool syncTxFull = false;
 
+// millis() of the last sync activity (a SYNC_CONTROL write or a sent chunk).
+// syncSessionActive() debounces this by SYNC_ACTIVE_IDLE_MS so the loop stays
+// in "dedicate to the transfer" mode across the short gaps between files.
+static volatile unsigned long lastSyncActivityMs = 0;
+static inline bool syncSessionActive()
+{
+    return lastSyncActivityMs != 0 && (millis() - lastSyncActivityMs) < SYNC_ACTIVE_IDLE_MS;
+}
+// True while photo/audio capture should stay suspended for an in-flight sync.
+static inline bool syncCaptureSuspended()
+{
+#if SYNC_PAUSE_CAPTURE
+    return syncSessionActive();
+#else
+    return false;
+#endif
+}
+
+// Cross-core handshake to pause the mic during a sync session (SYNC_PAUSE_CAPTURE).
+// loop_app (core0) requests the pause; audioTask (core1) owns the mic, so it is
+// the only side that calls mic_stop()/mic_start() and signals back via audioPaused.
+// This guarantees the PDM mic is fully stopped before loop_app raises the CPU
+// frequency (the PDM clock can't survive SYNC_BOOST_CPU_MHZ).
+static volatile bool audioPauseRequested = false;
+static volatile bool audioPaused = false;
+
 // -------------------------------------------------------------------------
 // Camera Frame
 // -------------------------------------------------------------------------
 camera_fb_t *fb = nullptr;
 image_orientation_t current_photo_orientation = ORIENTATION_0_DEGREES;
+// True while the camera is initialized. The sensor is deinitialized between
+// interval captures to save power, so this gates camera_ensure_on/camera_off.
+bool cameraActive = false;
 
 // Forward declarations
 void handlePhotoControl(int8_t controlValue);
-void readBatteryLevel();
-void updateBatteryService();
 void IRAM_ATTR buttonISR();
 void handleButton();
 void setupTouch();
@@ -494,6 +524,14 @@ void shutdownDevice()
     // Stop photo capture
     isCapturingPhotos = false;
 
+    // Power down the camera before deep sleep. The XIAO ESP32S3 Sense wires the
+    // OV2640 with no PWDN pin (PWDN_GPIO_NUM == -1), so esp_camera_deinit() --
+    // which stops the XCLK the sensor runs off of -- is the only way to drop its
+    // draw. Without this the sensor stays clocked through deep sleep and pulls
+    // several mA continuously, dwarfing the ESP32's own ~10uA and flattening the
+    // battery in a couple of hours.
+    esp_camera_deinit();
+
     // Disconnect BLE gracefully
     if (connected) {
         Serial.println("Disconnecting BLE...");
@@ -747,6 +785,34 @@ static TaskHandle_t audioTaskHandle = nullptr;
 void audioTask(void *param)
 {
     for (;;) {
+        // 同期セッション中はマイクを止めて転送に CPU/SD を明け渡す(SYNC_PAUSE_CAPTURE)。
+        // マイクの所有者はこのタスクなので mic_stop()/mic_start() はここだけで呼び、
+        // loop_app(core0) とは audioPauseRequested/audioPaused でハンドシェイクする。
+        // これにより loop_app が CPU を昇圧する前に PDM が確実に停止している。
+        if (audioPauseRequested) {
+            if (!audioPaused) {
+                // 開いている発話があれば末尾まで書き切ってから止める。
+                if (utteranceEndPending) {
+                    utteranceEndPending = false;
+                    storage_audio_end_utterance();
+                }
+                if (mic_is_running()) {
+                    mic_stop();
+                }
+                audioPaused = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (audioPaused) {
+            // 再開: loop_app が先に CPU を NORMAL へ戻してから要求を下げているので、
+            // ここでマイクを起こすときには既に安全なクロックに戻っている。
+            if (audioEnabled) {
+                mic_start();
+            }
+            audioPaused = false;
+        }
+
         // SDファースト化により常時キャプチャする（接続有無に依存しない）。
         // VAD が無音を落とすので、無音中は opus_process() がエンコードする
         // フレーム自体が無く、CPU と SD への負荷は発話中だけに収まる。
@@ -780,8 +846,7 @@ class ServerHandler : public BLEServerCallbacks
         connected = true;
         audioSubscribed = false;
         Serial.println(">>> BLE Client connected.");
-        // Send current battery level, unsynced stats and capture mode on connect
-        updateBatteryService();
+        // Send unsynced stats and capture mode on connect
         updateSyncStatus(true);
         publishCaptureMode(true);
     }
@@ -894,12 +959,26 @@ class SyncControlCallback : public BLECharacteristicCallbacks
             fileId = (uint32_t) data[1] | ((uint32_t) data[2] << 8) | ((uint32_t) data[3] << 16) |
                      ((uint32_t) data[4] << 24);
         }
+        // Any control command means the app is mid-sync: keep the session alive so
+        // loop_app stays in flat-out mode and capture stays paused.
+        lastSyncActivityMs = millis();
         switch (data[0]) {
         case SYNC_CMD_MANIFEST:
             syncManifestRequested = true;
             break;
         case SYNC_CMD_GET_FILE:
             syncRequestedFileId = fileId;
+            // Optional resume params: [u32 offset][u32 crcSeed] after the id. A
+            // legacy 5-byte request omits them and restarts the file from 0.
+            if (len >= 13) {
+                syncRequestedOffset = (uint32_t) data[5] | ((uint32_t) data[6] << 8) | ((uint32_t) data[7] << 16) |
+                                      ((uint32_t) data[8] << 24);
+                syncRequestedCrc = (uint32_t) data[9] | ((uint32_t) data[10] << 8) | ((uint32_t) data[11] << 16) |
+                                   ((uint32_t) data[12] << 24);
+            } else {
+                syncRequestedOffset = 0;
+                syncRequestedCrc = 0;
+            }
             syncFileRequested = true;
             break;
         case SYNC_CMD_ACK_FILE: {
@@ -951,83 +1030,6 @@ class TimeSyncCallback : public BLECharacteristicCallbacks
         timeSyncPending = true; // Applied in loop_app: may rename files on SD
     }
 };
-
-// -------------------------------------------------------------------------
-// Battery Functions
-// -------------------------------------------------------------------------
-void readBatteryLevel()
-{
-    // Take multiple ADC readings for stability
-    int adcSum = 0;
-    for (int i = 0; i < 10; i++) {
-        int value = analogRead(BATTERY_ADC_PIN);
-        adcSum += value;
-        delay(10);
-    }
-    int adcValue = adcSum / 10;
-
-    // ESP32-S3 ADC: 12-bit (0-4095), reference voltage ~3.3V
-    float adcVoltage = (adcValue / 4095.0f) * 3.3f;
-
-    // Apply voltage divider ratio to get actual battery voltage
-    batteryVoltage = adcVoltage * VOLTAGE_DIVIDER_RATIO;
-
-    // Clamp voltage to reasonable range
-    if (batteryVoltage > 5.0f)
-        batteryVoltage = 5.0f;
-    if (batteryVoltage < 2.5f)
-        batteryVoltage = 2.5f;
-
-    // Load-compensated battery calculation (accounts for voltage sag under load)
-    float loadCompensatedMax = BATTERY_MAX_VOLTAGE;
-    float loadCompensatedMin = BATTERY_MIN_VOLTAGE;
-
-    // More accurate percentage calculation for load conditions
-    if (batteryVoltage >= loadCompensatedMax) {
-        batteryPercentage = 100;
-    } else if (batteryVoltage <= loadCompensatedMin) {
-        batteryPercentage = 0;
-    } else {
-        float range = loadCompensatedMax - loadCompensatedMin;
-        batteryPercentage = (int) (((batteryVoltage - loadCompensatedMin) / range) * 100.0f);
-    }
-
-    // Smooth percentage changes to avoid jumpy readings
-    static int lastBatteryPercentage = batteryPercentage;
-    if (abs(batteryPercentage - lastBatteryPercentage) > 5) {
-        batteryPercentage = lastBatteryPercentage + (batteryPercentage > lastBatteryPercentage ? 2 : -2);
-    }
-    lastBatteryPercentage = batteryPercentage;
-
-    // Clamp percentage
-    if (batteryPercentage > 100)
-        batteryPercentage = 100;
-    if (batteryPercentage < 0)
-        batteryPercentage = 0;
-
-    // Battery status with load info
-    Serial.print("Battery: ");
-    Serial.print(batteryVoltage);
-    Serial.print("V (");
-    Serial.print(batteryPercentage);
-    Serial.print("%) [Load-compensated: ");
-    Serial.print(loadCompensatedMin);
-    Serial.print("V-");
-    Serial.print(loadCompensatedMax);
-    Serial.println("V]");
-}
-
-void updateBatteryService()
-{
-    if (batteryLevelCharacteristic) {
-        uint8_t batteryLevel = (uint8_t) batteryPercentage;
-        batteryLevelCharacteristic->setValue(&batteryLevel, 1);
-
-        if (connected) {
-            batteryLevelCharacteristic->notify();
-        }
-    }
-}
 
 // -------------------------------------------------------------------------
 // Sync (microSD -> app bulk transfer over SYNC_DATA notifications)
@@ -1097,6 +1099,7 @@ static bool syncNotify(size_t len)
     syncTxFull = false;
     syncDataCharacteristic->setValue(syncTxBuffer, len);
     syncDataCharacteristic->notify();
+    lastSyncActivityMs = millis(); // Keep the sync session alive while chunks flow
     return !syncTxFull;
 }
 
@@ -1122,15 +1125,30 @@ void processSync()
 
     // Delete-all: drop the backlog without transferring it. Cancels any
     // in-flight transfer first; manifest ids are invalidated so the app
-    // re-requests on its next sync.
+    // re-requests on its next sync. The actual deletion runs incrementally
+    // below so a large backlog can't block the loop (and the link) for minutes.
     if (syncPurgeRequested) {
         syncPurgeRequested = false;
         syncState = SYNC_IDLE;
         syncFile = nullptr;
         syncManifestBuilt = false;
-        int removed = storage_delete_all();
-        Serial.printf("sync: purged %d files\n", removed);
-        updateSyncStatus(true);
+        syncPurgeActive = true;
+        syncPurgeRemoved = 0;
+    }
+    if (syncPurgeActive) {
+        int removed = storage_delete_batch(SYNC_PURGE_BATCH);
+        syncPurgeRemoved += (uint32_t) removed;
+        // Keep the sync session alive so capture stays paused and the CPU stays
+        // boosted while we drain. Refresh the readable count every pass (the app
+        // polls it for the progress bar) but only notify once on completion --
+        // notifying every pass would flood the BLE TX buffer.
+        lastSyncActivityMs = millis();
+        bool done = removed < SYNC_PURGE_BATCH; // couldn't fill a batch -> backlog drained
+        updateSyncStatus(done);
+        if (done) {
+            syncPurgeActive = false;
+            Serial.printf("sync: purge complete (%lu files)\n", (unsigned long) syncPurgeRemoved);
+        }
     }
 
     if (!connected || syncDataCharacteristic == nullptr) {
@@ -1168,11 +1186,18 @@ void processSync()
         manifest_entry_t *entry = findManifestEntry(syncRequestedFileId);
         if (entry == nullptr || entry->path[0] == '\0') {
             syncSendFileError(syncRequestedFileId);
+        } else if (syncRequestedOffset > entry->size) {
+            // App claims more bytes than the file holds (stale partial after the
+            // file changed): refuse so it discards its buffer and refetches from 0.
+            syncSendFileError(syncRequestedFileId);
         } else {
             syncFile = entry;
-            syncFileOffset = 0;
+            // Resume from the app's offset, seeding the running CRC with the app's
+            // CRC over the bytes it already has. seq always restarts at 0 for the
+            // request, so the app appends this stream onto its held prefix.
+            syncFileOffset = syncRequestedOffset;
             syncFileSeq = 0;
-            syncFileCrc = 0;
+            syncFileCrc = syncRequestedCrc;
             syncState = SYNC_SENDING_FILE;
         }
     }
@@ -1335,16 +1360,6 @@ void configure_ble()
 
     updateSyncStatus(false);
 
-    // Battery Service
-    BLEService *batteryService = server->createService(BATTERY_SERVICE_UUID);
-    batteryLevelCharacteristic = batteryService->createCharacteristic(
-        BATTERY_LEVEL_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-
-    // Set initial battery level
-    readBatteryLevel();
-    uint8_t initialBatteryLevel = (uint8_t) batteryPercentage;
-    batteryLevelCharacteristic->setValue(&initialBatteryLevel, 1);
-
     // Device Information Service
     BLEService *deviceInfoService = server->createService(DEVICE_INFORMATION_SERVICE_UUID);
     BLECharacteristic *manufacturerNameCharacteristic =
@@ -1387,7 +1402,6 @@ void configure_ble()
 
     // Start services
     service->start();
-    batteryService->start();
     deviceInfoService->start();
     otaService->start();
 
@@ -1495,8 +1509,44 @@ void configure_camera()
     if (err != ESP_OK) {
         Serial.printf("Camera init failed with error 0x%x\n", err);
     } else {
+        cameraActive = true;
         Serial.println("Camera initialized successfully.");
     }
+}
+
+// Bring the camera up on demand (it is kept deinitialized between captures to
+// save power -- see CAMERA_WARMUP_FRAMES in config.h). Discards a few warm-up
+// frames so exposure has settled before the caller grabs the kept shot.
+// Returns false if init failed. Blocks core0 for the init + warm-up duration,
+// so callers must gate this the same way take_photo() is (skipped during sync).
+static bool camera_ensure_on()
+{
+    if (cameraActive) {
+        return true;
+    }
+    configure_camera();
+    if (!cameraActive) {
+        return false;
+    }
+    for (int i = 0; i < CAMERA_WARMUP_FRAMES; i++) {
+        camera_fb_t *warm = esp_camera_fb_get();
+        if (warm) {
+            esp_camera_fb_return(warm);
+        }
+    }
+    return true;
+}
+
+// Power the camera back down between captures. Safe to call when already off.
+// The caller must have returned any held frame buffer first (esp_camera_deinit
+// frees the framebuffer pool underneath it).
+static void camera_off()
+{
+    if (!cameraActive) {
+        return;
+    }
+    esp_camera_deinit();
+    cameraActive = false;
 }
 
 // -------------------------------------------------------------------------
@@ -1535,7 +1585,11 @@ void setup_app()
     setCpuFrequencyMhz(NORMAL_CPU_FREQ_MHZ);
 
     configure_ble();
+    // Probe the camera at boot to surface wiring/PSRAM faults early, then power
+    // it back down. It is brought up on demand for each interval capture
+    // (camera_ensure_on) and kept off the rest of the time to save battery.
     configure_camera();
+    camera_off();
 
     // Mount the microSD card. With a card present the device records photos
     // and VAD-gated audio to it continuously and the app pulls them via the
@@ -1563,12 +1617,6 @@ void setup_app()
     Serial.print(PHOTO_CAPTURE_INTERVAL_MS / 1000);
     Serial.println(" seconds.");
 
-    // Initial battery reading
-    // Battery voltage divider
-    analogReadResolution(12);                           // optional: set 12-bit resolution
-    analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db); // set attenuation for full 3.3V range
-
-    readBatteryLevel();
     deviceState = DEVICE_ACTIVE;
 
     // Initialize audio subsystem
@@ -1654,6 +1702,38 @@ void loop_app()
     // Sync transfer (manifest / file chunks / acks / deferred time set)
     processSync();
 
+#if SYNC_PAUSE_CAPTURE
+    // Dedicate the device to an active sync: pause audio capture (and, with it,
+    // the PDM mic) so the transfer owns the SD bus and CPU. With the mic stopped
+    // we can also raise the CPU clock — applied only once audioTask confirms the
+    // mic is halted, and dropped back to NORMAL before the mic is restarted.
+    {
+        static bool syncCapturePaused = false;
+        bool active = syncSessionActive();
+        if (active && !syncCapturePaused) {
+            utteranceEndPending = true; // flush+close any open utterance on audioTask's next pass
+            audioPauseRequested = true;
+            syncCapturePaused = true;
+        } else if (!active && syncCapturePaused) {
+#if SYNC_BOOST_CPU_MHZ
+            setCpuFrequencyMhz(NORMAL_CPU_FREQ_MHZ); // restore before the mic restarts (PDM needs the normal clock)
+#endif
+            audioPauseRequested = false;
+            syncCapturePaused = false;
+        }
+#if SYNC_BOOST_CPU_MHZ
+        // Raise the clock only after the mic is confirmed stopped, and only once.
+        static bool cpuBoosted = false;
+        if (syncCapturePaused && audioPaused && !cpuBoosted) {
+            setCpuFrequencyMhz(SYNC_BOOST_CPU_MHZ);
+            cpuBoosted = true;
+        } else if (!syncCapturePaused && cpuBoosted) {
+            cpuBoosted = false; // clock already restored above, before clearing the pause request
+        }
+#endif
+    }
+#endif
+
     // Notify the app when the unsynced counts change (throttled; the app also
     // reads SYNC_STATUS on connect).
     static unsigned long lastSyncStatusUpdate = 0;
@@ -1675,21 +1755,6 @@ void loop_app()
     // ここ(loopTask)で送ると写真送信などでループが詰まる間に TX リングが溢れて
     // 音声フレームを落とすため、producer と同じタスク内で送るようにした。
 
-    // Check battery level periodically
-    if (now - lastBatteryCheck >= BATTERY_TASK_INTERVAL_MS) {
-        readBatteryLevel();
-        updateBatteryService();
-        lastBatteryCheck = now;
-    }
-
-    // Force battery update on first connection
-    static bool firstBatteryUpdate = true;
-    if (connected && firstBatteryUpdate) {
-        readBatteryLevel();
-        updateBatteryService();
-        firstBatteryUpdate = false;
-    }
-
     // Check if it's time to capture a photo, by mode:
     //   LOCAL                    -> save to the SD on the fixed interval,
     //                               connection-independent (live upload only on
@@ -1703,7 +1768,10 @@ void loop_app()
     bool sdSave = storage_available() && (captureMode == CAPTURE_MODE_LOCAL || !connected);
     bool wantLiveUpload = isCapturingPhotos && connected;
     bool wantPhoto = sdSave || wantLiveUpload;
-    if (wantPhoto && !photoDataUploading && photoDue) {
+    // Skip interval capture during an active sync: take_photo() blocks core0 for
+    // ~50-100ms and would stall the transfer (the missed frame is captured once
+    // the session goes idle).
+    if (wantPhoto && !photoDataUploading && photoDue && !syncCaptureSuspended()) {
         if (singleShot) {
             isCapturingPhotos = false;
             if (storage_available()) {
@@ -1711,12 +1779,20 @@ void loop_app()
             }
         }
         Serial.println("Interval reached. Capturing photo...");
-        if (take_photo()) {
+        // Bring the camera up just for this shot; it is kept off between
+        // intervals to save power. camera_ensure_on() blocks for the init +
+        // warm-up, but we already skip this whole block during a sync.
+        if (!camera_ensure_on()) {
+            Serial.println("Camera unavailable; skipping capture.");
+        } else if (take_photo()) {
             lastCaptureTime = now;
             if (sdSave) {
                 storage_save_photo(fb->buf, fb->len, (uint8_t) current_photo_orientation);
             }
             if (wantLiveUpload) {
+                // Keep the camera on until the BLE upload finishes returning the
+                // frame buffer (deinit would free it underneath the transfer);
+                // camera_off() runs at the end-of-photo marker below.
                 Serial.println("Photo capture successful. Starting upload...");
                 photoDataUploading = true;
                 sent_photo_bytes = 0;
@@ -1724,7 +1800,11 @@ void loop_app()
             } else {
                 esp_camera_fb_return(fb);
                 fb = nullptr;
+                camera_off();
             }
+        } else {
+            // Grab failed after a successful init -- don't strand the camera on.
+            camera_off();
         }
     }
 
@@ -1777,9 +1857,11 @@ void loop_app()
             Serial.println("Photo upload complete.");
 
             photoDataUploading = false;
-            // Free camera buffer
+            // Free camera buffer, then power the camera down until the next
+            // interval (the buffer must be returned before deinit frees the pool).
             esp_camera_fb_return(fb);
             fb = nullptr;
+            camera_off();
             Serial.println("Camera frame buffer freed.");
             photo_chunks_this_loop = 0; // Reset counter
         }
@@ -1787,8 +1869,13 @@ void loop_app()
         photo_chunks_this_loop = 0; // Reset when not uploading
     }
 
-    // Adaptive loop delay: fast while streaming, relaxed otherwise.
-    if (photoDataUploading || audioSubscribed) {
+    // Adaptive loop delay: flat-out during a sync, fast while streaming, relaxed
+    // otherwise. Without the sync case the loop used to sleep 50ms after every
+    // chunk burst (audio/photo streaming are not subscribed during a pull), which
+    // dominated transfer time; yield minimally so the next burst starts at once.
+    if (syncSessionActive()) {
+        delay(0);
+    } else if (photoDataUploading || audioSubscribed) {
         delay(5); // Fast during upload or audio streaming
     } else {
         delay(50);

@@ -412,38 +412,47 @@ bool storage_delete_file(const char *path, uint8_t type, uint32_t size)
     return ok;
 }
 
-// Delete every file in `dir`, skipping the currently-open utterance. Only
-// entries already returned by openNextFile() are removed, which is safe to do
-// mid-iteration (readdir does not revisit them). Returns the count removed.
-static int deleteAllInDir(const char *dir)
+// Delete up to `maxCount` files in `dir`, skipping the currently-open utterance,
+// decrementing the in-RAM counters per delete. Only entries already returned by
+// openNextFile() are removed, which is safe mid-iteration (readdir does not
+// revisit them); since deleted files are gone, the next call's fresh SD.open
+// resumes with the remaining ones. Returns the count removed.
+static int deleteBatchInDir(const char *dir, uint8_t type, int maxCount)
 {
     File root = SD.open(dir);
     if (!root) {
         return 0;
     }
     int removed = 0;
-    for (File f = root.openNextFile(); f; f = root.openNextFile()) {
+    for (File f = root.openNextFile(); f && removed < maxCount; f = root.openNextFile()) {
         if (f.isDirectory()) {
             f.close();
             continue;
         }
         char path[64];
         snprintf(path, sizeof(path), "%s/%s", dir, f.name());
+        uint32_t size = f.size();
         f.close();
         if (utteranceOpen && strcmp(path, utterancePath) == 0) {
             continue; // Still recording into this one; leave it for the next sync.
         }
         if (SD.remove(path)) {
             removed++;
+            if (type == SYNC_FILE_TYPE_AUDIO && audioFileCount > 0) {
+                audioFileCount--;
+            } else if (type == SYNC_FILE_TYPE_PHOTO && photoFileCount > 0) {
+                photoFileCount--;
+            }
+            unsyncedBytes = unsyncedBytes >= size ? unsyncedBytes - size : 0;
         }
     }
     root.close();
     return removed;
 }
 
-int storage_delete_all()
+int storage_delete_batch(int maxCount)
 {
-    if (!sdAvailable) {
+    if (!sdAvailable || maxCount <= 0) {
         return 0;
     }
     lock();
@@ -451,13 +460,10 @@ int storage_delete_all()
         readFile.close();
         readPath[0] = '\0';
     }
-    int removed = deleteAllInDir(AUDIO_DIR) + deleteAllInDir(PHOTO_DIR);
-    // Recompute from disk so the open utterance (if any) is still accounted for.
-    audioFileCount = 0;
-    photoFileCount = 0;
-    unsyncedBytes = 0;
-    scanDir(AUDIO_DIR, &audioFileCount, &unsyncedBytes);
-    scanDir(PHOTO_DIR, &photoFileCount, &unsyncedBytes);
+    int removed = deleteBatchInDir(AUDIO_DIR, SYNC_FILE_TYPE_AUDIO, maxCount);
+    if (removed < maxCount) {
+        removed += deleteBatchInDir(PHOTO_DIR, SYNC_FILE_TYPE_PHOTO, maxCount - removed);
+    }
     unlock();
     return removed;
 }

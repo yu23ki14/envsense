@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { beginBackgroundWork } from './backgroundWork';
 import type { BleDevice } from './ble';
 import {
+  type DeleteProgress,
   type DeviceSyncStatus,
   deleteAllDeviceFiles,
   ENVSENSE_SERVICE_UUID,
@@ -31,6 +32,7 @@ export type DeviceSyncState = {
   /** 転送せずにデバイス上の未同期ファイルを全消去する。 */
   deleteAll: () => Promise<void>;
   deleting: boolean;
+  deleteProgress: DeleteProgress | null;
 };
 
 export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
@@ -39,6 +41,7 @@ export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
   const [progress, setProgress] = useState<SyncProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteProgress, setDeleteProgress] = useState<DeleteProgress | null>(null);
 
   useEffect(() => {
     setStatus(null);
@@ -104,8 +107,9 @@ export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
     if (device == null || syncing || deleting) return;
     setDeleting(true);
     setError(null);
+    setDeleteProgress(null);
     try {
-      await deleteAllDeviceFiles(device);
+      await deleteAllDeviceFiles(device, setDeleteProgress);
       const service = await device.getService(ENVSENSE_SERVICE_UUID);
       const char = await service.getCharacteristic(SYNC_STATUS_UUID);
       const parsed = parseSyncStatus(await char.read());
@@ -115,11 +119,12 @@ export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setDeleting(false);
+      setDeleteProgress(null);
     }
   }, [device, syncing, deleting]);
 
   return useMemo(
-    () => ({ status, syncing, progress, error, startSync, deleteAll, deleting }),
-    [status, syncing, progress, error, startSync, deleteAll, deleting],
+    () => ({ status, syncing, progress, error, startSync, deleteAll, deleting, deleteProgress }),
+    [status, syncing, progress, error, startSync, deleteAll, deleting, deleteProgress],
   );
 }

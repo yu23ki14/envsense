@@ -25,17 +25,9 @@
 // skipping the Opus encode + SD writes during silence.
 #define NORMAL_CPU_FREQ_MHZ 80 // Operating frequency (fixed)
 
-// Battery Configuration - Dual 250mAh @ 3.5V-4.1V under load (500mAh total)
-#define BATTERY_MAX_VOLTAGE 4.2f      // 4.2V fully charged (under load)
-#define BATTERY_MIN_VOLTAGE 3.2f      // 3.2V empty (under load)
-#define BATTERY_CRITICAL_VOLTAGE 3.3f // Emergency shutdown voltage
-#define BATTERY_LOW_VOLTAGE 3.4f      // Low battery warning
-#define VOLTAGE_DIVIDER_RATIO 6.086f  // Calibrated to match multimeter readings (load-compensated)
-
-// Battery Monitoring - Extended intervals for power savings
-#define BATTERY_REPORT_INTERVAL_MS 90000 // 1.5 minute reporting (was 60s)
-#define BATTERY_TASK_INTERVAL_MS 20000   // 20 second internal checks (was 15s)
-#define BATTERY_ADC_PIN 2                // GPIO2 (A1) - voltage divider connection
+// Battery monitoring was removed: the hardware has no battery-sense wiring, so
+// the ADC only ever read a floating value. No Battery Service is exposed; the
+// app degrades gracefully (shows "—") when the characteristic is absent.
 
 // =============================================================================
 // CAMERA CONFIGURATION - Power optimized for 6-8 hour battery life
@@ -52,8 +44,16 @@
 #define CAMERA_TASK_STACK_SIZE 3072     // Reduced stack size
 #define CAMERA_TASK_PRIORITY 2
 
-// Camera Power Management - Reduce power cycling
-#define CAMERA_POWER_DOWN_DELAY_MS 60000 // Power down camera after 60s idle (was 8s)
+// Camera Power Management - the OV2640 is deinitialized between interval
+// captures (esp_camera_deinit stops the XCLK the sensor runs off of, the only
+// way to drop its draw on this board -- PWDN_GPIO_NUM is -1). It is re-inited
+// just before each shot. Without this the sensor stays clocked 24/7 and pulls
+// tens of mA continuously even though a photo is only taken every 30s.
+//
+// After a cold re-init the OV2640's AEC/AGC/AWB are unconverged, so the first
+// frames come out dark/greenish. Grab and discard this many before the kept
+// shot to let exposure settle.
+#define CAMERA_WARMUP_FRAMES 3
 
 // =============================================================================
 // IMAGE ORIENTATION
@@ -97,8 +97,6 @@ typedef enum {
 // =============================================================================
 // TASK CONFIGURATION - Optimized stack sizes
 // =============================================================================
-#define BATTERY_TASK_STACK_SIZE 2048
-#define BATTERY_TASK_PRIORITY 1
 #define POWER_MANAGEMENT_TASK_STACK_SIZE 2048
 #define POWER_MANAGEMENT_TASK_PRIORITY 0
 
@@ -178,18 +176,37 @@ typedef enum {
 // SYNC TRANSFER - bulk file transfer to the app over BLE (see SYNC_* UUIDs)
 // =============================================================================
 #define SYNC_MANIFEST_MAX_ENTRIES 2048 // Manifest table in PSRAM (~1 day of photos + utterances)
-#define SYNC_CHUNKS_PER_LOOP 16        // Max file chunks attempted per loop_app() pass (keeps touch/button responsive)
-#define SYNC_CHUNK_DELAY_MS 1          // Pause between chunk notifications so the BLE stack can flush
+#define SYNC_PURGE_BATCH                                                                                               \
+    32 // Files deleted per loop_app() pass during an incremental delete-all (PURGE).
+       // Bounded so a large backlog can't block the loop/BLE link for minutes; the
+       // shrinking SYNC_STATUS count drives the app's delete progress bar
+#define SYNC_CHUNKS_PER_LOOP                                                                                           \
+    40 // Max file chunks attempted per loop_app() pass (a full burst owns core0 only
+       // briefly; capture is paused during a sync session, so larger bursts are safe)
+#define SYNC_CHUNK_DELAY_MS                                                                                            \
+    0 // No fixed inter-chunk pause: syncNotify() detects a full TX buffer and the
+      // congestion backoff below handles flushing, so a blind 1ms delay only wasted time
 #define SYNC_CONGESTION_BACKOFF_MS                                                                                     \
     5 // Wait after a notify is rejected (TX buffer full) before resending — under one connection interval so throughput
       // stays high
+// A sync "session" stays active for this long after the last transfer activity (control write or sent chunk). While
+// active, loop_app() runs flat-out and capture is paused (see SYNC_PAUSE_CAPTURE). The debounce keeps the brief gaps
+// between consecutive file requests from thrashing the mic/CPU on and off.
+#define SYNC_ACTIVE_IDLE_MS 6000
+#define SYNC_PAUSE_CAPTURE 1 // Pause photo + audio capture during an active sync session to dedicate the device to it
+#define SYNC_BOOST_CPU_MHZ                                                                                             \
+    240 // CPU frequency while a sync session is active AND the mic is stopped (0 = stay at
+        // NORMAL_CPU_FREQ_MHZ). Only ever applied with the PDM mic halted — see the handshake in
+        // app.cpp's audioTask / loop_app sync-pause manager.
 // Fast connection interval requested on connect (units of 1.25 ms). A short
 // interval lets the central poll often, which is the main lever for bulk-sync
 // throughput; both iOS and Android honor a reasonable request.
-#define SYNC_CONN_INTERVAL_MIN 6          // 7.5 ms
-#define SYNC_CONN_INTERVAL_MAX 12         // 15 ms
-#define SYNC_CONN_SUPERVISION_TIMEOUT 400 // 4 s
-#define SYNC_STATUS_INTERVAL_MS 10000     // Min interval between unsynced-stats notifications
+#define SYNC_CONN_INTERVAL_MIN 6  // 7.5 ms
+#define SYNC_CONN_INTERVAL_MAX 12 // 15 ms
+#define SYNC_CONN_SUPERVISION_TIMEOUT                                                                                  \
+    1000                              // 10 s — tolerate brief loop stalls (photo recapture / mic restart in the\
+                                      // gaps between transfer bursts) without dropping the link mid-sync
+#define SYNC_STATUS_INTERVAL_MS 10000 // Min interval between unsynced-stats notifications
 
 // =============================================================================
 // BLE UUID DEFINITIONS - envsense Protocol
@@ -233,7 +250,12 @@ typedef enum {
 //
 // SYNC_CONTROL (write): [cmd, ...]
 #define SYNC_CMD_MANIFEST 0x01 // [cmd] -> manifest entries stream over SYNC_DATA
-#define SYNC_CMD_GET_FILE 0x02 // [cmd][u32 fileId] -> file chunks stream over SYNC_DATA
+#define SYNC_CMD_GET_FILE                                                                                              \
+    0x02                       // [cmd][u32 fileId]([u32 offset][u32 crcSeed]) -> file chunks stream over SYNC_DATA.
+                               // The trailing offset+crcSeed are optional (legacy 5-byte form = 0/0): they let the app
+                               // resume a partially-received file after a reconnect. offset = bytes already held by the
+                               // app; crcSeed = the app's running CRC32 over those bytes (the FILE_END crc still covers
+                               // the whole file because esp_rom_crc32_le composes incrementally).
 #define SYNC_CMD_ACK_FILE 0x03 // [cmd][u32 fileId] -> file verified by the app; delete from SD
 #define SYNC_CMD_ABORT 0x04    // [cmd] -> stop the current transfer
 #define SYNC_CMD_PURGE 0x05    // [cmd] -> delete ALL unsynced files without transferring
@@ -248,10 +270,6 @@ typedef enum {
 #define SYNC_FILE_TYPE_AUDIO 0
 #define SYNC_FILE_TYPE_PHOTO 1
 // -----------------------------------------------------------------------------
-
-// Battery Service UUID - Cast to uint16_t for BLE compatibility
-#define BATTERY_SERVICE_UUID (uint16_t) 0x180F
-#define BATTERY_LEVEL_UUID (uint16_t) 0x2A19
 
 // OTA Service UUIDs
 #define OTA_SERVICE_UUID "EA800010-9C72-497F-81F9-752FFE11F565"

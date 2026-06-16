@@ -153,6 +153,10 @@ export function DeviceScreen() {
     sync.progress != null && sync.progress.totalBytes > 0
       ? Math.min(1, sync.progress.doneBytes / sync.progress.totalBytes)
       : 0;
+  const deleteProgressRatio =
+    sync.deleteProgress != null && sync.deleteProgress.total > 0
+      ? Math.min(1, sync.deleteProgress.done / sync.deleteProgress.total)
+      : 0;
 
   const runPowerAction = async () => {
     if (liveDevice == null || powerAction == null) return;
@@ -206,7 +210,9 @@ export function DeviceScreen() {
               <StatusMetric icon="bluetooth" label="信号" value={rssiLabel} />
               <StatusMetric icon="cloud" label="未同期" value={unsyncedLabel} />
             </View>
-            {isLive && unsyncedFiles != null && (unsyncedFiles > 0 || sync.syncing) ? (
+            {isLive &&
+            unsyncedFiles != null &&
+            (unsyncedFiles > 0 || sync.syncing || sync.deleting) ? (
               <View style={styles.syncSection}>
                 {sync.syncing ? (
                   <>
@@ -226,6 +232,22 @@ export function DeviceScreen() {
                       />
                     </View>
                   </>
+                ) : sync.deleting ? (
+                  <>
+                    <Text variant="caption" color="textMuted">
+                      {sync.deleteProgress != null
+                        ? `削除中 ${sync.deleteProgress.done}/${sync.deleteProgress.total} 件`
+                        : '削除を開始しています…'}
+                    </Text>
+                    <View style={styles.progressTrack}>
+                      <View
+                        style={[
+                          styles.progressFill,
+                          { width: `${Math.round(deleteProgressRatio * 100)}%` },
+                        ]}
+                      />
+                    </View>
+                  </>
                 ) : (
                   <>
                     <Button
@@ -237,7 +259,6 @@ export function DeviceScreen() {
                     <Button
                       variant="text"
                       onPress={() => setDeleteAllOpen(true)}
-                      loading={sync.deleting}
                       iconLeft={<Icon name="trash" size={16} color="error" />}
                     >
                       同期せずすべて削除
