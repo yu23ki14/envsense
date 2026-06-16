@@ -12,6 +12,9 @@ export const Photo = z.object({
   height: z.number().int().positive(),
   bytes: z.number().int().nonnegative(),
   rotationDeg: PhotoRotation,
+  // 取り込み時の重複排除に使う知覚ハッシュ（dHash, 16 桁 hex）。デコード失敗時や
+  // 機能追加前の既存レコードは null（.default で旧データもそのままパースできる）。
+  phash: z.string().nullable().default(null),
   isBlurry: z.boolean().nullable(),
   description: z.string().nullable(),
   descriptionAt: TimestampMs.nullable(),

@@ -28,6 +28,7 @@
     "expo-secure-store": "~55.0.14",
     "expo-splash-screen": "~55.0.21",
     "expo-status-bar": "~55.0.6",
+    "jpeg-js": "^0.4.4",
     "lucide-react-native": "^1.16.0",
     "nanoid": "^5.1.11",
     "react": "19.2.0",
@@ -48,6 +49,7 @@
   },
   "devDependencies": {
     "@digital-go-jp/design-tokens": "^1.1.9",
+    "@types/jpeg-js": "^0.3.7",
     "@types/react": "~19.2.0",
     "@types/web-bluetooth": "^0.0.20",
     "eas-cli": "^19.0.1",

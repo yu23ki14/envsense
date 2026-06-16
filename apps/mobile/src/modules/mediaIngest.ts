@@ -12,6 +12,8 @@ import {
   appendBytes,
   audioSessionPath,
   dateKey,
+  getPhoto,
+  listPhotoIdsForDay,
   newId,
   pendingAudioPath,
   photoPath,
@@ -21,7 +23,12 @@ import {
 } from '../data';
 import { oggOpusAudioPages, oggOpusHeaderBytes, opusFramesToOgg, randomOggSerial } from './audio';
 import { beginBackgroundWork } from './backgroundWork';
+import { computeDHash, isDuplicateHash } from './imageHash';
 import { transcribePending } from './transcriptionBacklog';
+
+// 取り込み時に重複判定で比較する「直前の写真」枚数。後続写真の取り込み時に対称的に
+// 比較されるので、これが実質「前後 N 枚ずつ」の窓になる。
+const DEDUP_NEIGHBOR_COUNT = 2;
 
 export const FRAMES_PER_SEGMENT = 500; // ~10s at 20ms per Opus frame.
 export const FRAME_DURATION_MS = 20;
@@ -70,11 +77,39 @@ export function jpegDimensions(bytes: Uint8Array): { width: number; height: numb
   return null;
 }
 
+/**
+ * 取り込もうとしている写真が、同じ日の直前 DEDUP_NEIGHBOR_COUNT 枚のいずれかと
+ * 「ほぼ同じ画像」か。phash 未保存（旧レコードやデコード失敗）の近傍は比較対象外。
+ */
+function isDuplicateOfRecentPhotos(phash: string, capturedAt: number): boolean {
+  const ids = listPhotoIdsForDay(dateKey(capturedAt));
+  const recent = ids.slice(-DEDUP_NEIGHBOR_COUNT);
+  for (const id of recent) {
+    const neighbor = getPhoto(id);
+    if (neighbor?.phash != null && isDuplicateHash(phash, neighbor.phash)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * デバイス由来の 1 枚を保存する。保存前に同じ日の直前 2 枚と知覚ハッシュを比較し、
+ * ほぼ同じ画像なら保存せず破棄する（ストリーミングはメモリ上のバッファを捨てるだけ、
+ * 同期は呼び出し側で ACK 済み = デバイス SD からは削除される）。
+ * 実際に保存したら true、重複として破棄したら false を返す。
+ */
 export function persistPhoto(
   buffer: Uint8Array,
   rotationDeg: PhotoRotation,
   capturedAt: number,
-): void {
+): boolean {
+  // phash が取れない（デコード失敗）場合は重複判定をスキップして通常保存する。
+  const phash = computeDHash(buffer);
+  if (phash != null && isDuplicateOfRecentPhotos(phash, capturedAt)) {
+    return false;
+  }
+
   const id = newId();
   const relative = photoPath(capturedAt, id);
   writeBytes(relative, buffer);
@@ -87,12 +122,14 @@ export function persistPhoto(
     height,
     bytes: buffer.length,
     rotationDeg,
+    phash,
     isBlurry: null,
     description: null,
     descriptionAt: null,
     descriptionModel: null,
   };
   savePhoto(photo);
+  return true;
 }
 
 /**
