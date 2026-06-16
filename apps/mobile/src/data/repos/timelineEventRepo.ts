@@ -1,7 +1,7 @@
 import { TimelineEvent } from '../schemas';
 import { StorageKeys } from '../storage/keys';
 import { deleteKey, getJSON, setJSON } from '../storage/mmkv';
-import { registerTimelineEvent, unregisterTimelineEvent } from './dayIndex';
+import { listTimelineIdsForDay, registerTimelineEvent, unregisterTimelineEvent } from './dayIndex';
 
 export function getTimelineEvent(id: string): TimelineEvent | null {
   return getJSON(StorageKeys.timeline(id), TimelineEvent);
@@ -20,6 +20,18 @@ export function deleteTimelineEvent(id: string): void {
   if (event == null) return;
   deleteKey(StorageKeys.timeline(id));
   unregisterTimelineEvent(id, event.bucketAt);
+}
+
+/**
+ * 削除された写真への参照を、その日のすべてのタイムラインイベントの photoIds から外す。
+ * イベント自体（タイトル・本文・音声参照）は残す。
+ */
+export function removePhotoFromTimelineEvents(date: string, photoId: string): void {
+  for (const id of listTimelineIdsForDay(date)) {
+    const event = getTimelineEvent(id);
+    if (event == null || !event.photoIds.includes(photoId)) continue;
+    saveTimelineEvent({ ...event, photoIds: event.photoIds.filter((p) => p !== photoId) });
+  }
 }
 
 export function getTimelineEventsByIds(ids: readonly string[]): TimelineEvent[] {
