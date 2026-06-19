@@ -176,10 +176,10 @@ typedef enum {
 // SYNC TRANSFER - bulk file transfer to the app over BLE (see SYNC_* UUIDs)
 // =============================================================================
 #define SYNC_MANIFEST_MAX_ENTRIES 2048 // Manifest table in PSRAM (~1 day of photos + utterances)
-#define SYNC_PURGE_BATCH                                                                                               \
-    32 // Files deleted per loop_app() pass during an incremental delete-all (PURGE).
-       // Bounded so a large backlog can't block the loop/BLE link for minutes; the
-       // shrinking SYNC_STATUS count drives the app's delete progress bar
+// Delete-all (PURGE) reformats the card (storage_format) -- O(1) regardless of file
+// count and it resets FAT directory bloat. Set to 1 for a ONE-SHOT recovery flash
+// to wipe a card too bloated to even scan at boot, then set back to 0.
+#define STORAGE_FORMAT_ON_BOOT 0
 #define SYNC_CHUNKS_PER_LOOP                                                                                           \
     40 // Max file chunks attempted per loop_app() pass (a full burst owns core0 only
        // briefly; capture is paused during a sync session, so larger bursts are safe)
@@ -207,6 +207,9 @@ typedef enum {
     1000                              // 10 s — tolerate brief loop stalls (photo recapture / mic restart in the\
                                       // gaps between transfer bursts) without dropping the link mid-sync
 #define SYNC_STATUS_INTERVAL_MS 10000 // Min interval between unsynced-stats notifications
+// Verbose sync tracing over Serial (control commands / manifest / per-file / ack / session
+// transitions). Pairs with the app-side [sync] logs to debug stalled transfers. Set 0 to silence.
+#define SYNC_DEBUG_LOG 1
 
 // =============================================================================
 // BLE UUID DEFINITIONS - envsense Protocol
@@ -247,6 +250,7 @@ typedef enum {
 // SYNC_STATUS (read/notify): [u16 audioFiles][u16 photoFiles][u32 totalBytes][u8 flags]
 #define SYNC_FLAG_SD_OK 0x01       // SD card mounted; SD-first capture is active
 #define SYNC_FLAG_CLOCK_VALID 0x02 // Device clock has been set since the last power loss
+#define SYNC_FLAG_PURGING 0x04     // A delete-all (PURGE) is in progress; counts are still shrinking
 //
 // SYNC_CONTROL (write): [cmd, ...]
 #define SYNC_CMD_MANIFEST 0x01 // [cmd] -> manifest entries stream over SYNC_DATA

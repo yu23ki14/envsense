@@ -4,8 +4,13 @@
 #include <SPI.h>
 #include <sys/time.h>
 
+#include "ff.h" // f_mkfs / f_mount for storage_format() (FatFs, via the SD lib's diskio)
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+
+// FatFs logical drive used by the Arduino SD library for the single SPI card.
+// ff_diskio_get_drive() hands out volume 0 first, so the only SD card is "0:".
+#define SD_FATFS_DRIVE "0:"
 
 // All SD access goes through this mutex: the audio task flushes utterance
 // buffers from core1 while loop_app streams sync chunks and BLE callbacks
@@ -100,15 +105,24 @@ bool storage_init()
         return false;
     }
 
-    SD.mkdir(AUDIO_DIR);
-    SD.mkdir(PHOTO_DIR);
-
     flushBuffer = (uint8_t *) ps_malloc(STORAGE_FLUSH_BYTES + OPUS_OUTPUT_MAX_BYTES + 2);
     if (flushBuffer == nullptr) {
         Serial.println("storage: failed to allocate flush buffer");
         SD.end();
         return false;
     }
+
+#if STORAGE_FORMAT_ON_BOOT
+    // One-shot recovery: wipe a card whose directories are too bloated to scan
+    // (set STORAGE_FORMAT_ON_BOOT back to 0 after the recovery flash). Skips the
+    // slow scanDir entirely since the freshly formatted card is empty.
+    Serial.println("storage: STORAGE_FORMAT_ON_BOOT -> formatting card");
+    sdAvailable = true; // storage_format() guards on this
+    return storage_format();
+#endif
+
+    SD.mkdir(AUDIO_DIR);
+    SD.mkdir(PHOTO_DIR);
 
     audioFileCount = 0;
     photoFileCount = 0;
@@ -135,38 +149,62 @@ bool storage_available()
 // least keeps them ordered before the current files.
 static void correctDirTimestamps(const char *dir, int64_t deltaMs)
 {
-    File root = SD.open(dir);
-    if (!root) {
-        return;
-    }
-    for (File f = root.openNextFile(); f; f = root.openNextFile()) {
-        if (f.isDirectory()) {
+    // Collect a bounded batch of rename pairs while the directory is open, close
+    // it, apply the renames, then rescan -- SD.rename() (f_rename) mid-walk
+    // corrupts the open openNextFile() iterator on FatFs the same way SD.remove()
+    // does. Renamed files get a valid epoch (epoch + deltaMs >= the valid-clock
+    // threshold) so the next scan skips them, which makes the loop terminate; the
+    // no-progress guard is a backstop in case a rename fails (e.g. name clash).
+    static const int CLOCK_FIX_BATCH = 32;
+    static char oldPaths[CLOCK_FIX_BATCH][64];
+    static char newPaths[CLOCK_FIX_BATCH][64];
+    for (;;) {
+        File root = SD.open(dir);
+        if (!root) {
+            return;
+        }
+        int n = 0;
+        for (File f = root.openNextFile(); f && n < CLOCK_FIX_BATCH; f = root.openNextFile()) {
+            if (f.isDirectory()) {
+                f.close();
+                continue;
+            }
+            char name[48];
+            strlcpy(name, f.name(), sizeof(name));
             f.close();
-            continue;
+            uint64_t epoch = epochFromName(name);
+            if (epoch >= CLOCK_VALID_MIN_EPOCH_MS) {
+                continue;
+            }
+            char oldPath[64];
+            snprintf(oldPath, sizeof(oldPath), "%s/%s", dir, name);
+            if (utteranceOpen && strcmp(oldPath, utterancePath) == 0) {
+                continue; // Open file: renamed on close via utterancePendingDelta
+            }
+            const char *suffix = strchr(name, '_') != nullptr ? strchr(name, '_') : strchr(name, '.');
+            strlcpy(oldPaths[n], oldPath, sizeof(oldPaths[n]));
+            snprintf(newPaths[n],
+                     sizeof(newPaths[n]),
+                     "%s/%llu%s",
+                     dir,
+                     (unsigned long long) (epoch + deltaMs),
+                     suffix != nullptr ? suffix : "");
+            n++;
         }
-        char name[48];
-        strlcpy(name, f.name(), sizeof(name));
-        f.close();
-        uint64_t epoch = epochFromName(name);
-        if (epoch >= CLOCK_VALID_MIN_EPOCH_MS) {
-            continue;
+        root.close();
+        if (n == 0) {
+            return; // No more files needing correction.
         }
-        char oldPath[64];
-        char newPath[64];
-        snprintf(oldPath, sizeof(oldPath), "%s/%s", dir, name);
-        if (utteranceOpen && strcmp(oldPath, utterancePath) == 0) {
-            continue; // Open file: renamed on close via utterancePendingDelta
+        int renamed = 0;
+        for (int i = 0; i < n; i++) {
+            if (SD.rename(oldPaths[i], newPaths[i])) {
+                renamed++;
+            }
         }
-        const char *suffix = strchr(name, '_') != nullptr ? strchr(name, '_') : strchr(name, '.');
-        snprintf(newPath,
-                 sizeof(newPath),
-                 "%s/%llu%s",
-                 dir,
-                 (unsigned long long) (epoch + deltaMs),
-                 suffix != nullptr ? suffix : "");
-        SD.rename(oldPath, newPath);
+        if (renamed == 0) {
+            return; // No progress (all renames failed) -- avoid spinning forever.
+        }
     }
-    root.close();
 }
 
 void storage_set_time(uint64_t epochMs)
@@ -412,60 +450,73 @@ bool storage_delete_file(const char *path, uint8_t type, uint32_t size)
     return ok;
 }
 
-// Delete up to `maxCount` files in `dir`, skipping the currently-open utterance,
-// decrementing the in-RAM counters per delete. Only entries already returned by
-// openNextFile() are removed, which is safe mid-iteration (readdir does not
-// revisit them); since deleted files are gone, the next call's fresh SD.open
-// resumes with the remaining ones. Returns the count removed.
-static int deleteBatchInDir(const char *dir, uint8_t type, int maxCount)
+// Delete-all via reformat. f_mkfs wipes the volume in O(1) regardless of how many
+// files (or stale directory-table entries) exist -- the only thing that reliably
+// clears FAT directory bloat. Runs on the SD lib's FatFs diskio (still registered
+// while mounted): unmount the logical drive, mkfs, then remount via SD.end()+
+// SD.begin() (SD.end() also re-registers a fresh diskio for the next mount).
+bool storage_format()
 {
-    File root = SD.open(dir);
-    if (!root) {
-        return 0;
-    }
-    int removed = 0;
-    for (File f = root.openNextFile(); f && removed < maxCount; f = root.openNextFile()) {
-        if (f.isDirectory()) {
-            f.close();
-            continue;
-        }
-        char path[64];
-        snprintf(path, sizeof(path), "%s/%s", dir, f.name());
-        uint32_t size = f.size();
-        f.close();
-        if (utteranceOpen && strcmp(path, utterancePath) == 0) {
-            continue; // Still recording into this one; leave it for the next sync.
-        }
-        if (SD.remove(path)) {
-            removed++;
-            if (type == SYNC_FILE_TYPE_AUDIO && audioFileCount > 0) {
-                audioFileCount--;
-            } else if (type == SYNC_FILE_TYPE_PHOTO && photoFileCount > 0) {
-                photoFileCount--;
-            }
-            unsyncedBytes = unsyncedBytes >= size ? unsyncedBytes - size : 0;
-        }
-    }
-    root.close();
-    return removed;
-}
-
-int storage_delete_batch(int maxCount)
-{
-    if (!sdAvailable || maxCount <= 0) {
-        return 0;
-    }
     lock();
-    if (readFile) { // Cached read handle may point at a file we are about to drop.
+    if (!sdAvailable) {
+        unlock();
+        return false;
+    }
+    sdAvailable = false; // make concurrent storage_* calls no-op during the wipe
+    if (readFile) {
         readFile.close();
         readPath[0] = '\0';
     }
-    int removed = deleteBatchInDir(AUDIO_DIR, SYNC_FILE_TYPE_AUDIO, maxCount);
-    if (removed < maxCount) {
-        removed += deleteBatchInDir(PHOTO_DIR, SYNC_FILE_TYPE_PHOTO, maxCount - removed);
+    if (utteranceOpen) {
+        utteranceFile.close();
+        utteranceOpen = false;
+    }
+    BYTE *work = (BYTE *) malloc(FF_MAX_SS);
+    FRESULT res = FR_NOT_ENOUGH_CORE;
+    if (work != nullptr) {
+        f_mount(nullptr, SD_FATFS_DRIVE, 0); // unmount logical drive; diskio stays registered
+        const MKFS_PARM opt = {(BYTE) FM_ANY, 0, 0, 0, 0};
+        res = f_mkfs(SD_FATFS_DRIVE, &opt, work, FF_MAX_SS);
+        free(work);
     }
     unlock();
-    return removed;
+
+    SD.end(); // drop the SD lib's now-stale mount + diskio registration
+    if (res != FR_OK) {
+        Serial.printf("storage: f_mkfs failed (%d)\n", (int) res);
+        return false;
+    }
+    if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_FREQ_HZ)) {
+        Serial.println("storage: remount after format failed");
+        return false;
+    }
+    SD.mkdir(AUDIO_DIR);
+    SD.mkdir(PHOTO_DIR);
+    audioFileCount = 0;
+    photoFileCount = 0;
+    unsyncedBytes = 0;
+    sdAvailable = true;
+    Serial.println("storage: format complete (card wiped)");
+    return true;
+}
+
+void storage_compact_empty_dirs()
+{
+    lock();
+    if (sdAvailable) {
+        // rmdir frees the directory's (possibly bloated) cluster chain; mkdir
+        // recreates a fresh 1-cluster table. Only acts when the dir is truly
+        // empty (rmdir fails harmlessly otherwise, so a count desync is safe).
+        if (audioFileCount == 0 && !utteranceOpen && SD.rmdir(AUDIO_DIR)) {
+            SD.mkdir(AUDIO_DIR);
+            Serial.println("storage: compacted empty /audio");
+        }
+        if (photoFileCount == 0 && SD.rmdir(PHOTO_DIR)) {
+            SD.mkdir(PHOTO_DIR);
+            Serial.println("storage: compacted empty /photo");
+        }
+    }
+    unlock();
 }
 
 void storage_stats(uint16_t *audioCount, uint16_t *photoCount, uint32_t *totalBytes)

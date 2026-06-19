@@ -53,12 +53,17 @@ int storage_build_manifest(manifest_entry_t *entries, int maxEntries);
 // The transfer CRC32 is accumulated by the caller as it streams chunks.
 int storage_read_file(const char *path, uint32_t offset, uint8_t *buf, size_t len);
 bool storage_delete_file(const char *path, uint8_t type, uint32_t size);
-// Deletes up to `maxCount` unsynced files (audio first, then photo) without
-// transferring, skipping the currently-open utterance, decrementing the in-RAM
-// counters per file. Returns the number removed this call; call repeatedly until
-// it returns < maxCount to drain the backlog incrementally (so the BLE link stays
-// serviced and SYNC_STATUS reports shrinking counts for the app's progress bar).
-int storage_delete_batch(int maxCount);
+// Delete-all (PURGE): reformat the card (f_mkfs) and recreate the dirs. This is
+// O(1) regardless of file count and, crucially, resets the FAT directory table
+// so openNextFile() never degrades from create/delete churn (see issue: a flat
+// dir with thousands of churned entries made every SD op pathologically slow).
+// Remounts and zeroes the in-RAM counters on success. Returns false on failure.
+bool storage_format();
+// Reset any unsynced directory that has drained to empty by rmdir+mkdir, which
+// frees its (possibly bloated) FAT directory cluster chain. Cheap no-op when the
+// dir still holds files. Call after a sync drains the backlog so long-lived,
+// always-synced devices don't accumulate directory-table bloat over time.
+void storage_compact_empty_dirs();
 void storage_stats(uint16_t *audioCount, uint16_t *photoCount, uint32_t *totalBytes);
 
 // Flush pending buffers and unmount (called before deep sleep).

@@ -30,13 +30,18 @@ const SYNC_PKT_ERROR = 0x7f;
 
 const SYNC_FLAG_SD_OK = 0x01;
 const SYNC_FLAG_CLOCK_VALID = 0x02;
+const SYNC_FLAG_PURGING = 0x04;
 const SYNC_MANIFEST_ENTRY_BYTES = 18;
 
 const FILE_TYPE_AUDIO = 0;
 const FILE_TYPE_PHOTO = 1;
 
-// パケット間がこれだけ空いたら転送失敗とみなす（接続劣化・ファーム停止）。
-const PACKET_TIMEOUT_MS = 10000;
+// パケット間がこれだけ空いたら転送失敗とみなし、再試行（= 新しい GET_FILE 書き込み）する。
+// この無音窓は firmware の SYNC_ACTIVE_IDLE_MS(=6000, config.h) より必ず短く保つこと。
+// 逆転すると、チャンク欠落で待っている間にファームが「同期終了」と誤判定して転送途中で
+// capture（PDMマイク + 定期撮影）を再開し、カメラ起動中に BLE が切れる（issue #74）。
+// チャンクは同期中ミリ秒間隔で流れるため 3 秒でも十分余裕がある。
+const PACKET_TIMEOUT_MS = 3000;
 const FILE_RETRY_COUNT = 2;
 // これより古いタイムスタンプは「時計未設定のまま記録された」ファイル
 // （firmware の CLOCK_VALID_MIN_EPOCH_MS と同じ 2021-01-01）。
@@ -48,6 +53,8 @@ export type DeviceSyncStatus = {
   totalBytes: number;
   sdOk: boolean;
   clockValid: boolean;
+  /** 削除（PURGE）進行中。完了するとファームがこれを false で notify してくる。 */
+  purging: boolean;
 };
 
 export type SyncProgress = {
@@ -106,6 +113,7 @@ export function parseSyncStatus(data: Uint8Array): DeviceSyncStatus | null {
     totalBytes: v.getUint32(4, true),
     sdOk: (flags & SYNC_FLAG_SD_OK) !== 0,
     clockValid: (flags & SYNC_FLAG_CLOCK_VALID) !== 0,
+    purging: (flags & SYNC_FLAG_PURGING) !== 0,
   };
 }
 
@@ -122,15 +130,21 @@ export async function writeTimeSync(device: BleDevice): Promise<void> {
   await char.write(payload);
 }
 
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
 export type DeleteProgress = { total: number; done: number };
 
+// 通知取りこぼし対策の read 間隔。完了判定自体は時間ではなく SYNC_FLAG_PURGING で行うが、
+// notify が落ちても進まなくならないよう、定期的に read して同じ判定を回す安全網。
+const DELETE_POLL_FALLBACK_MS = 2000;
+// 念のための壁時計上限（通知も read も完了を返さない異常時のみ作用）。
+const DELETE_MAX_MS = 10 * 60 * 1000;
+
 /**
- * デバイス上の未同期ファイルを転送せずに全消去する（SYNC_CMD_PURGE）。ファーム側は
- * 1 ループにつき一定数ずつ増分削除し、SYNC_STATUS の件数が減っていく。ここでは開始時の
- * 件数を分母に、減った分を進捗として報告しながら 0（または録音中の発話で下げ止まり）まで
- * ポーリングする。
+ * デバイス上の未同期ファイルを転送せずに全消去する（SYNC_CMD_PURGE）。
+ *
+ * 完了はファーム側の通知で判定する：PURGE 中は SYNC_STATUS が `purging=true` で残件数を
+ * 定期 notify し、削除し切ると `purging=false` を最終 notify する。ここでは subscribe して
+ * 進捗を `onProgress` に流し、`purging` が true→false に落ちたら（=ファームが完了を宣言）
+ * 解決する。通知が落ちても止まらないよう、定期 read を安全網にする。
  */
 export async function deleteAllDeviceFiles(
   device: BleDevice,
@@ -140,32 +154,74 @@ export async function deleteAllDeviceFiles(
   const control = await service.getCharacteristic(SYNC_CONTROL_UUID);
   const statusChar = await service.getCharacteristic(SYNC_STATUS_UUID);
 
-  const readTotal = async (): Promise<number> => {
-    const status = parseSyncStatus(await statusChar.read());
-    return status != null ? status.audioFiles + status.photoFiles : -1;
-  };
-
-  const initial = Math.max(0, await readTotal());
+  const initialStatus = parseSyncStatus(await statusChar.read());
+  // 観測した最大件数を進捗の分母にする（開始時 read が一過性に失敗/過少でも、
+  // 削除中の満件数で分母が確定するので、進捗バーが 0 のまま固まらない）。
+  let initial = initialStatus != null ? initialStatus.audioFiles + initialStatus.photoFiles : 0;
+  console.log(`[deleteAll] initial read total=${initial}, writing PURGE`);
   onProgress?.({ total: initial, done: 0 });
-  await control.write(controlPacket(SYNC_CMD_PURGE));
 
-  let previous = -1;
-  let stable = 0;
-  // 増分削除の進捗をポーリングする。0 で完了、下げ止まり（消せない発話ファイルが残る）が
-  // 3 回続いたら完了、いずれも来なければ十分長い壁時計上限で打ち切る。
-  for (let i = 0; i < 600; i++) {
-    await sleep(300);
-    const total = await readTotal();
-    if (total < 0) continue; // 一過性の読み取り失敗
-    onProgress?.({ total: initial, done: Math.max(0, initial - total) });
-    if (total === 0) return;
-    if (total === previous) {
-      if (++stable >= 3) return; // 下げ止まり（例: 録音中の発話が 1 件残る）
-    } else {
-      stable = 0;
-      previous = total;
-    }
-  }
+  // PURGE は購読の成否に依存させず、直接送る。完了/進捗は notify と fallback read の
+  // 両方で拾う（notify が来なくても read で進捗・完了を検出できる）。
+  await control.write(controlPacket(SYNC_CMD_PURGE));
+  console.log('[deleteAll] PURGE written');
+
+  await new Promise<void>((resolve) => {
+    let unsubscribe: (() => void) | null = null;
+    let fallbackTimer: ReturnType<typeof setInterval> | null = null;
+    let maxTimer: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+    let sawPurging = false; // purging=true を一度でも観測したか（開始前の定期通知での誤判定防止）
+
+    const cleanup = () => {
+      if (fallbackTimer != null) clearInterval(fallbackTimer);
+      if (maxTimer != null) clearTimeout(maxTimer);
+      unsubscribe?.();
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+
+    const apply = (status: DeviceSyncStatus | null, src: string) => {
+      if (status == null || settled) return;
+      const total = status.audioFiles + status.photoFiles;
+      if (total > initial) initial = total; // 分母は観測最大に追従
+      console.log(
+        `[deleteAll] ${src}: total=${total} purging=${status.purging} initial=${initial}`,
+      );
+      onProgress?.({ total: initial, done: Math.max(0, initial - total) });
+      if (status.purging) {
+        sawPurging = true;
+        return;
+      }
+      // purging=false。開始 notify を取りこぼしていても、件数が初期値より減っていれば
+      // 削除は走った証跡なので完了とみなす（録音中の 1 件残り＝下げ止まりも含む）。
+      if (total === 0 || sawPurging || total < initial) {
+        console.log(`[deleteAll] FINISH via ${src} (total=${total})`);
+        finish();
+      }
+    };
+
+    statusChar
+      .subscribe((data) => apply(parseSyncStatus(data), 'notify'))
+      .then((unsub) => {
+        if (settled) unsub();
+        else unsubscribe = unsub;
+      })
+      .catch((err) => console.warn('[deleteAll] subscribe failed (read fallback continues)', err));
+
+    fallbackTimer = setInterval(() => {
+      statusChar
+        .read()
+        .then((data) => apply(parseSyncStatus(data), 'read'))
+        .catch(() => {}); // 一過性の read 失敗は無視（次の通知/read で回復）
+    }, DELETE_POLL_FALLBACK_MS);
+
+    maxTimer = setTimeout(finish, DELETE_MAX_MS);
+  });
 }
 
 function controlPacket(cmd: number, fileId?: number): Uint8Array {
@@ -213,6 +269,7 @@ class SyncChannel {
   constructor(
     private control: BleCharacteristic,
     private data: BleCharacteristic,
+    private log: (message: string) => void = () => {},
   ) {}
 
   async open(): Promise<void> {
@@ -233,6 +290,7 @@ class SyncChannel {
       const fail = (message: string) => {
         if (timer != null) clearTimeout(timer);
         this.handler = null;
+        this.log(`manifest FAILED: ${message} (received ${entries.length} entries so far)`);
         reject(new Error(message));
       };
       const arm = () => {
@@ -259,10 +317,15 @@ class SyncChannel {
         } else if (type === SYNC_PKT_MANIFEST_END) {
           if (timer != null) clearTimeout(timer);
           this.handler = null;
+          const declared = packet.length >= 3 ? view(packet).getUint16(1, true) : entries.length;
+          this.log(
+            `manifest done: ${entries.length} entries received (device declared ${declared})`,
+          );
           resolve(entries);
         }
       };
       arm();
+      this.log('-> MANIFEST');
       this.control.write(controlPacket(SYNC_CMD_MANIFEST)).catch((err) => fail(String(err)));
     });
   }
@@ -285,6 +348,7 @@ class SyncChannel {
       const fail = (message: string) => {
         if (timer != null) clearTimeout(timer);
         this.handler = null;
+        this.log(`file ${entry.id} FAILED: ${message} (had ${partial.offset}/${entry.size} bytes)`);
         reject(new Error(message));
       };
       const arm = () => {
@@ -312,12 +376,19 @@ class SyncChannel {
           // 通知は接続内で順序保証されるので、欠落 = 取りこぼし確定。seq は GET_FILE
           // ごとに 0 始まりで、payload は partial.offset の続きに積む。
           if (seq !== expectedSeq || partial.offset + payload.length > buffer.length) {
-            fail(`File ${entry.id} chunk sequence broken at ${seq}`);
+            fail(`File ${entry.id} chunk sequence broken at ${seq} (expected ${expectedSeq})`);
             return;
           }
           buffer.set(payload, partial.offset);
           partial.offset += payload.length;
           expectedSeq += 1;
+          // チャンクごとのログは多すぎるので 64 チャンク（≒数十 KB）ごとに心拍を出す。
+          // これが止まったら転送が途中で詰まっていることが分かる。
+          if (expectedSeq % 64 === 0) {
+            this.log(
+              `file ${entry.id} receiving: ${partial.offset}/${entry.size} bytes (seq ${seq})`,
+            );
+          }
           onChunk(payload.length);
           return;
         }
@@ -326,17 +397,23 @@ class SyncChannel {
         this.handler = null;
         const expectedCrc = v.getUint32(5, true);
         if (partial.offset !== entry.size) {
+          this.log(
+            `file ${entry.id} FILE_END but incomplete: ${partial.offset}/${entry.size} bytes`,
+          );
           reject(new Error(`File ${entry.id} incomplete: ${partial.offset}/${entry.size} bytes`));
         } else if (crc32(buffer) !== expectedCrc) {
           partial.offset = 0; // 壊れているので部分を捨て、次回 0 から取り直す
+          this.log(`file ${entry.id} CRC mismatch (${entry.size} bytes received)`);
           reject(new Error(`File ${entry.id} failed CRC check`));
         } else {
+          this.log(`file ${entry.id} OK (${entry.size} bytes, ${expectedSeq} chunks)`);
           resolve(buffer);
         }
       };
       arm();
       // 続きから要求する場合は手元のバイトの CRC32 をシードとして渡す。
       const crcSeed = partial.offset > 0 ? crc32(buffer.subarray(0, partial.offset)) : 0;
+      this.log(`-> GET_FILE id=${entry.id} offset=${partial.offset}/${entry.size}`);
       this.control
         .write(getFilePacket(entry.id, partial.offset, crcSeed))
         .catch((err) => fail(String(err)));
@@ -344,10 +421,12 @@ class SyncChannel {
   }
 
   ack(fileId: number): Promise<void> {
+    this.log(`-> ACK id=${fileId}`);
     return this.control.write(controlPacket(SYNC_CMD_ACK_FILE, fileId));
   }
 
   abort(): Promise<void> {
+    this.log('-> ABORT');
     return this.control.write(controlPacket(SYNC_CMD_ABORT));
   }
 }
@@ -384,10 +463,16 @@ export async function runDeviceSync(
   device: BleDevice,
   onProgress?: (progress: SyncProgress) => void,
 ): Promise<{ files: number; skipped: number; bytes: number }> {
+  // 経過時間つきのトレースロガー。ファーム側の `[<millis>] sync:` ログと突き合わせて
+  // どこで転送が止まるか調べる。原因特定後はこのログ群ごと外せる。
+  const t0 = Date.now();
+  const log = (message: string) => console.log(`[sync +${Date.now() - t0}ms] ${message}`);
+
+  log('start');
   const service = await device.getService(ENVSENSE_SERVICE_UUID);
   const control = await service.getCharacteristic(SYNC_CONTROL_UUID);
   const data = await service.getCharacteristic(SYNC_DATA_UUID);
-  const channel = new SyncChannel(control, data);
+  const channel = new SyncChannel(control, data, log);
   await channel.open();
 
   const progress: SyncProgress = {
@@ -408,19 +493,32 @@ export async function runDeviceSync(
     progress.totalFiles = manifest.length;
     progress.totalBytes = manifest.reduce((sum, e) => sum + e.size, 0);
     report();
+    const audioCount = manifest.filter((e) => e.type === FILE_TYPE_AUDIO).length;
+    log(
+      `transfer phase: ${manifest.length} files (${audioCount} audio / ${
+        manifest.length - audioCount
+      } photo), ${progress.totalBytes} bytes total`,
+    );
 
     const ingestor = new AudioSessionIngestor();
     let synced = 0;
     let skipped = 0;
     let syncedBytes = 0;
 
+    let fileIndex = 0;
     for (const entry of manifest) {
+      fileIndex += 1;
       // 前回の接続で途中まで受け取っていれば、その続きから再開する。
       const key = partialKey(entry);
       let partial = partialTransfers.get(key);
       if (partial == null || partial.buffer.length !== entry.size) {
         partial = { buffer: new Uint8Array(entry.size), offset: 0 };
       }
+      log(
+        `file ${fileIndex}/${manifest.length} id=${entry.id} type=${entry.type} size=${
+          entry.size
+        }${partial.offset > 0 ? ` (resume from ${partial.offset})` : ''}`,
+      );
       let bytes: Uint8Array | null = null;
       const chunkBase = progress.doneBytes;
       // 再開分は受信済みとして進捗に反映（onChunk は今回の新規分だけ加算する）。
@@ -437,6 +535,9 @@ export async function runDeviceSync(
         }
       }
       if (bytes == null) {
+        log(
+          `file ${entry.id} SKIPPED after ${FILE_RETRY_COUNT} attempts (offset=${partial.offset})`,
+        );
         // 途中まで受信できていれば次回の再接続で続きから再開できるよう保持する。
         // 何も受信していない／CRC失敗で破棄された(offset=0)場合はキャッシュを残さない。
         if (partial.offset > 0 && partial.offset < entry.size) {
@@ -470,9 +571,12 @@ export async function runDeviceSync(
 
     progress.phase = 'finishing';
     report();
+    log(`transfer done: ${synced} synced, ${skipped} skipped; flushing audio ingestor…`);
     await ingestor.flush();
+    log(`finished: ${synced} files (${skipped} skipped), ${syncedBytes} bytes`);
     return { files: synced, skipped, bytes: syncedBytes };
   } catch (err) {
+    log(`aborted with error: ${err instanceof Error ? err.message : String(err)}`);
     await channel.abort().catch(() => undefined);
     throw err;
   } finally {

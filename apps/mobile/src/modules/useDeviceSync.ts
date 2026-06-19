@@ -88,11 +88,6 @@ export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
     try {
       const result = await runDeviceSync(device, setProgress);
       console.log(`Sync complete: ${result.files} files (${result.skipped} skipped)`);
-      // 完了直後の残量を反映する（デバイス側の定期 notify を待たない）。
-      const service = await device.getService(ENVSENSE_SERVICE_UUID);
-      const char = await service.getCharacteristic(SYNC_STATUS_UUID);
-      const parsed = parseSyncStatus(await char.read());
-      if (parsed != null) setStatus(parsed);
     } catch (err) {
       console.warn('Sync failed', err);
       setError(err instanceof Error ? err.message : String(err));
@@ -100,6 +95,19 @@ export function useDeviceSync(device: BleDevice | null): DeviceSyncState {
       endWork();
       setSyncing(false);
       setProgress(null);
+    }
+    // 完了直後の残量を反映する（デバイス側の定期 notify を待たない）。これは UI 上の
+    // 進捗とは独立したベストエフォートの後処理にする。転送直後は BLE が混みやすく、
+    // タイムアウトの無い read（ble.native.ts）がここで詰まると同期 UI が
+    // 「文字起こしを仕上げています…」のまま固まるため（issue #74）、syncing/progress を
+    // 先に解除してから読む。読めなくても定期 notify がいずれ status を更新する。
+    try {
+      const service = await device.getService(ENVSENSE_SERVICE_UUID);
+      const char = await service.getCharacteristic(SYNC_STATUS_UUID);
+      const parsed = parseSyncStatus(await char.read());
+      if (parsed != null) setStatus(parsed);
+    } catch (err) {
+      console.warn('Post-sync status refresh failed (will rely on periodic notify)', err);
     }
   }, [device, syncing]);
 

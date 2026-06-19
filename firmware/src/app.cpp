@@ -144,11 +144,9 @@ static volatile uint32_t syncRequestedOffset = 0;
 static volatile uint32_t syncRequestedCrc = 0;
 static volatile bool syncAbortRequested = false;
 static volatile bool syncPurgeRequested = false;
-// Incremental delete-all: once requested, the backlog is drained a batch per
-// loop pass so the BLE link stays serviced and SYNC_STATUS reports shrinking
-// counts (the app renders a progress bar off the decreasing total).
+// Delete-all in progress (reflected to the app via SYNC_FLAG_PURGING). Set while
+// storage_format() runs so the app sees the start->done transition in SYNC_STATUS.
 static bool syncPurgeActive = false;
-static uint32_t syncPurgeRemoved = 0;
 static volatile uint32_t syncAckQueue[8];
 static volatile uint8_t syncAckHead = 0;
 static volatile uint8_t syncAckTail = 0;
@@ -161,6 +159,9 @@ static manifest_entry_t *syncFile = nullptr; // Entry currently being streamed
 static uint32_t syncFileOffset = 0;
 static uint16_t syncFileSeq = 0;
 static uint32_t syncFileCrc = 0;
+// Debug counter: how many times the current file's chunk send hit a full TX buffer (congestion
+// backoff). Reset at file start, reported at FILE_END — a high count points at the BLE link, not SD.
+static uint32_t syncFileCongestion = 0;
 static uint8_t syncTxBuffer[BLE_MTU_SIZE];
 // Set by SyncDataStatusCallback when a notify is rejected because the
 // controller TX buffer is full. notify() reports this synchronously via
@@ -220,6 +221,14 @@ void processAudioTx();
 // Sync forward declarations
 void updateSyncStatus(bool notifyApp);
 void processSync();
+
+// Verbose sync trace (config.h SYNC_DEBUG_LOG). Each line is prefixed with millis() so it can be
+// lined up against the app-side [sync +Nms] logs while debugging stalled transfers.
+#if SYNC_DEBUG_LOG
+#define SYNC_LOG(fmt, ...) Serial.printf("[%lu] sync: " fmt "\n", (unsigned long) millis(), ##__VA_ARGS__)
+#else
+#define SYNC_LOG(...) ((void) 0)
+#endif
 
 // Capture mode forward declarations
 void applyCaptureMode(uint8_t mode);
@@ -867,6 +876,14 @@ class ServerHandler : public BLEServerCallbacks
         // Drop any in-flight sync transfer; the manifest ids are connection-
         // scoped, so the app starts over from SYNC_CMD_MANIFEST on reconnect.
         syncAbortRequested = true;
+        if (syncState == SYNC_SENDING_FILE && syncFile != nullptr) {
+            SYNC_LOG("DISCONNECT mid-file %lu at offset %lu/%lu",
+                     (unsigned long) syncFile->id,
+                     (unsigned long) syncFileOffset,
+                     (unsigned long) syncFile->size);
+        } else if (syncState != SYNC_IDLE) {
+            SYNC_LOG("DISCONNECT mid-sync (state=%d)", (int) syncState);
+        }
         Serial.println("<<< BLE Client disconnected. Restarting advertising.");
         BLEDevice::startAdvertising();
     }
@@ -965,6 +982,7 @@ class SyncControlCallback : public BLECharacteristicCallbacks
         switch (data[0]) {
         case SYNC_CMD_MANIFEST:
             syncManifestRequested = true;
+            SYNC_LOG("<- MANIFEST");
             break;
         case SYNC_CMD_GET_FILE:
             syncRequestedFileId = fileId;
@@ -980,20 +998,32 @@ class SyncControlCallback : public BLECharacteristicCallbacks
                 syncRequestedCrc = 0;
             }
             syncFileRequested = true;
+            SYNC_LOG("<- GET_FILE id=%lu offset=%lu crcSeed=%08lx",
+                     (unsigned long) syncRequestedFileId,
+                     (unsigned long) syncRequestedOffset,
+                     (unsigned long) syncRequestedCrc);
             break;
         case SYNC_CMD_ACK_FILE: {
             uint8_t nextHead = (syncAckHead + 1) % 8;
             if (nextHead != syncAckTail) { // Queue full: drop; the app retries unacked files next sync
                 syncAckQueue[syncAckHead] = fileId;
                 syncAckHead = nextHead;
+                SYNC_LOG("<- ACK id=%lu", (unsigned long) fileId);
+            } else {
+                SYNC_LOG("<- ACK id=%lu DROPPED (queue full)", (unsigned long) fileId);
             }
             break;
         }
         case SYNC_CMD_ABORT:
             syncAbortRequested = true;
+            SYNC_LOG("<- ABORT");
             break;
         case SYNC_CMD_PURGE:
             syncPurgeRequested = true;
+            SYNC_LOG("<- PURGE");
+            break;
+        default:
+            SYNC_LOG("<- unknown cmd 0x%02x (len=%u)", data[0], (unsigned) len);
             break;
         }
     }
@@ -1049,6 +1079,9 @@ void updateSyncStatus(bool notifyApp)
     }
     if (storage_clock_valid()) {
         flags |= SYNC_FLAG_CLOCK_VALID;
+    }
+    if (syncPurgeActive) {
+        flags |= SYNC_FLAG_PURGING; // App watches this drop to detect delete-all completion.
     }
     uint8_t payload[9];
     payload[0] = audioCount & 0xFF;
@@ -1109,6 +1142,9 @@ void processSync()
 {
     if (syncAbortRequested) {
         syncAbortRequested = false;
+        if (syncState != SYNC_IDLE) {
+            SYNC_LOG("abort: state=%d, dropping in-flight transfer", (int) syncState);
+        }
         syncState = SYNC_IDLE;
         syncFile = nullptr;
         if (!connected) {
@@ -1123,32 +1159,21 @@ void processSync()
         updateSyncStatus(true); // Clock-valid flag changed
     }
 
-    // Delete-all: drop the backlog without transferring it. Cancels any
-    // in-flight transfer first; manifest ids are invalidated so the app
-    // re-requests on its next sync. The actual deletion runs incrementally
-    // below so a large backlog can't block the loop (and the link) for minutes.
+    // Delete-all: wipe the backlog by reformatting the card (storage_format),
+    // which is O(1) regardless of file count and resets FAT directory bloat.
+    // SYNC_FLAG_PURGING is announced before and cleared after so the app detects
+    // start and completion from the notify stream.
     if (syncPurgeRequested) {
         syncPurgeRequested = false;
         syncState = SYNC_IDLE;
         syncFile = nullptr;
         syncManifestBuilt = false;
         syncPurgeActive = true;
-        syncPurgeRemoved = 0;
-    }
-    if (syncPurgeActive) {
-        int removed = storage_delete_batch(SYNC_PURGE_BATCH);
-        syncPurgeRemoved += (uint32_t) removed;
-        // Keep the sync session alive so capture stays paused and the CPU stays
-        // boosted while we drain. Refresh the readable count every pass (the app
-        // polls it for the progress bar) but only notify once on completion --
-        // notifying every pass would flood the BLE TX buffer.
-        lastSyncActivityMs = millis();
-        bool done = removed < SYNC_PURGE_BATCH; // couldn't fill a batch -> backlog drained
-        updateSyncStatus(done);
-        if (done) {
-            syncPurgeActive = false;
-            Serial.printf("sync: purge complete (%lu files)\n", (unsigned long) syncPurgeRemoved);
-        }
+        updateSyncStatus(true); // announce purging=true (count still full)
+        bool ok = storage_format();
+        syncPurgeActive = false;
+        updateSyncStatus(true); // purging=false + fresh (zero) counts = completion signal
+        Serial.printf("sync: purge (format) %s\n", ok ? "complete" : "FAILED");
     }
 
     if (!connected || syncDataCharacteristic == nullptr) {
@@ -1157,6 +1182,7 @@ void processSync()
 
     // Deletions for files the app verified. Throttled implicitly by the queue
     // depth; each delete is a single FAT operation.
+    bool ackedAny = false;
     while (syncAckTail != syncAckHead) {
         uint32_t id = syncAckQueue[syncAckTail];
         syncAckTail = (syncAckTail + 1) % 8;
@@ -1164,7 +1190,16 @@ void processSync()
         if (entry != nullptr && entry->path[0] != '\0') {
             storage_delete_file(entry->path, entry->type, entry->size);
             entry->path[0] = '\0'; // Guard against double-ack
+            ackedAny = true;
+            SYNC_LOG("file %lu acked -> deleted from SD", (unsigned long) id);
+        } else {
+            SYNC_LOG("file %lu ack ignored (unknown/already deleted)", (unsigned long) id);
         }
+    }
+    // When a sync drains a directory to empty, reset its FAT table so long-lived
+    // always-synced devices don't accumulate directory bloat (no-op if non-empty).
+    if (ackedAny) {
+        storage_compact_empty_dirs();
     }
 
     if (syncManifestRequested) {
@@ -1177,7 +1212,9 @@ void processSync()
             syncManifestBuilt = true;
             syncManifestSendIndex = 0;
             syncState = SYNC_SENDING_MANIFEST;
-            Serial.printf("sync: manifest built (%d entries)\n", syncManifestCount);
+            SYNC_LOG("manifest built (%d entries)", syncManifestCount);
+        } else {
+            SYNC_LOG("manifest alloc FAILED (ps_malloc returned null)");
         }
     }
 
@@ -1185,12 +1222,22 @@ void processSync()
         syncFileRequested = false;
         manifest_entry_t *entry = findManifestEntry(syncRequestedFileId);
         if (entry == nullptr || entry->path[0] == '\0') {
+            SYNC_LOG("file %lu -> ERROR (not in manifest / already deleted)", (unsigned long) syncRequestedFileId);
             syncSendFileError(syncRequestedFileId);
         } else if (syncRequestedOffset > entry->size) {
             // App claims more bytes than the file holds (stale partial after the
             // file changed): refuse so it discards its buffer and refetches from 0.
+            SYNC_LOG("file %lu -> ERROR (offset %lu > size %lu)",
+                     (unsigned long) syncRequestedFileId,
+                     (unsigned long) syncRequestedOffset,
+                     (unsigned long) entry->size);
             syncSendFileError(syncRequestedFileId);
         } else {
+            SYNC_LOG("file %lu start (offset=%lu/%lu type=%u)",
+                     (unsigned long) entry->id,
+                     (unsigned long) syncRequestedOffset,
+                     (unsigned long) entry->size,
+                     entry->type);
             syncFile = entry;
             // Resume from the app's offset, seeding the running CRC with the app's
             // CRC over the bytes it already has. seq always restarts at 0 for the
@@ -1198,6 +1245,7 @@ void processSync()
             syncFileOffset = syncRequestedOffset;
             syncFileSeq = 0;
             syncFileCrc = syncRequestedCrc;
+            syncFileCongestion = 0;
             syncState = SYNC_SENDING_FILE;
         }
     }
@@ -1217,6 +1265,7 @@ void processSync()
                     delay(SYNC_CONGESTION_BACKOFF_MS); // resend MANIFEST_END next pass
                     break;
                 }
+                SYNC_LOG("manifest sent (%d entries) -> MANIFEST_END", syncManifestCount);
                 syncState = SYNC_IDLE;
                 break;
             }
@@ -1254,17 +1303,25 @@ void processSync()
                 memcpy(&syncTxBuffer[1], &syncFile->id, 4);
                 memcpy(&syncTxBuffer[5], &syncFileCrc, 4);
                 if (!syncNotify(9)) {
+                    syncFileCongestion++;
                     delay(SYNC_CONGESTION_BACKOFF_MS); // resend FILE_END next pass
                     break;
                 }
-                Serial.printf(
-                    "sync: file %lu sent (%lu bytes)\n", (unsigned long) syncFile->id, (unsigned long) syncFile->size);
+                SYNC_LOG("file %lu sent (%lu bytes, crc=%08lx, %lu congestion backoffs)",
+                         (unsigned long) syncFile->id,
+                         (unsigned long) syncFile->size,
+                         (unsigned long) syncFileCrc,
+                         (unsigned long) syncFileCongestion);
                 syncFile = nullptr;
                 syncState = SYNC_IDLE;
                 break;
             }
             int n = storage_read_file(syncFile->path, syncFileOffset, &syncTxBuffer[7], payloadMax);
             if (n <= 0) {
+                SYNC_LOG("file %lu -> ERROR (SD read failed at offset %lu, n=%d)",
+                         (unsigned long) syncFile->id,
+                         (unsigned long) syncFileOffset,
+                         n);
                 syncSendFileError(syncFile->id);
                 syncFile = nullptr;
                 syncState = SYNC_IDLE;
@@ -1276,6 +1333,7 @@ void processSync()
             if (!syncNotify(7 + n)) {
                 // Dropped by a full TX buffer: leave offset/seq/CRC untouched so
                 // the same chunk re-reads and resends next pass (no data loss).
+                syncFileCongestion++;
                 delay(SYNC_CONGESTION_BACKOFF_MS);
                 break;
             }
@@ -1714,12 +1772,14 @@ void loop_app()
             utteranceEndPending = true; // flush+close any open utterance on audioTask's next pass
             audioPauseRequested = true;
             syncCapturePaused = true;
+            SYNC_LOG("session active -> capture paused");
         } else if (!active && syncCapturePaused) {
 #if SYNC_BOOST_CPU_MHZ
             setCpuFrequencyMhz(NORMAL_CPU_FREQ_MHZ); // restore before the mic restarts (PDM needs the normal clock)
 #endif
             audioPauseRequested = false;
             syncCapturePaused = false;
+            SYNC_LOG("session idle (%lu ms quiet) -> capture resumed", (unsigned long) SYNC_ACTIVE_IDLE_MS);
         }
 #if SYNC_BOOST_CPU_MHZ
         // Raise the clock only after the mic is confirmed stopped, and only once.
@@ -1727,6 +1787,7 @@ void loop_app()
         if (syncCapturePaused && audioPaused && !cpuBoosted) {
             setCpuFrequencyMhz(SYNC_BOOST_CPU_MHZ);
             cpuBoosted = true;
+            SYNC_LOG("CPU boosted to %d MHz (mic confirmed stopped)", SYNC_BOOST_CPU_MHZ);
         } else if (!syncCapturePaused && cpuBoosted) {
             cpuBoosted = false; // clock already restored above, before clearing the pause request
         }
