@@ -26,6 +26,7 @@ const SYNC_PKT_MANIFEST_END = 0x00;
 const SYNC_PKT_MANIFEST = 0x01;
 const SYNC_PKT_CHUNK = 0x02;
 const SYNC_PKT_FILE_END = 0x03;
+// 0x04 (旧 WINDOW_END) は予約。stop-and-wait では使わない。
 const SYNC_PKT_ERROR = 0x7f;
 
 const SYNC_FLAG_SD_OK = 0x01;
@@ -36,13 +37,16 @@ const SYNC_MANIFEST_ENTRY_BYTES = 18;
 const FILE_TYPE_AUDIO = 0;
 const FILE_TYPE_PHOTO = 1;
 
-// パケット間がこれだけ空いたら転送失敗とみなし、再試行（= 新しい GET_FILE 書き込み）する。
-// この無音窓は firmware の SYNC_ACTIVE_IDLE_MS(=6000, config.h) より必ず短く保つこと。
-// 逆転すると、チャンク欠落で待っている間にファームが「同期終了」と誤判定して転送途中で
-// capture（PDMマイク + 定期撮影）を再開し、カメラ起動中に BLE が切れる（issue #74）。
-// チャンクは同期中ミリ秒間隔で流れるため 3 秒でも十分余裕がある。
+// GET_FILE を送ってから応答（チャンク or FILE_END）がこれだけ来なければ失敗とみなして再要求する。
+// この無音窓は firmware の SYNC_ACTIVE_IDLE_MS(=6000, config.h) より必ず短く保つこと。逆転すると、
+// 応答待ちの間にファームが「同期終了」と誤判定して capture（PDMマイク + 定期撮影）を再開し、
+// カメラ起動中に BLE が切れる（issue #74）。stop-and-wait の 1 往復は通常 1 秒未満なので 3 秒で十分。
 const PACKET_TIMEOUT_MS = 3000;
-const FILE_RETRY_COUNT = 2;
+// 1 ファイルの転送で「1 チャンク進むごとにリセット」する無進捗カウントの上限。これを超えたら
+// そのファイルはスキップ（次回の同期で再挑戦）。全取りこぼし or タイムアウトが連続した回数。
+const MAX_WINDOW_STALLS = 5;
+// 同期開始時、ABORT 後に BLE パイプラインの残骸チャンクが流れ切るのを待つ窓。
+const DRAIN_MS = 250;
 // これより古いタイムスタンプは「時計未設定のまま記録された」ファイル
 // （firmware の CLOCK_VALID_MIN_EPOCH_MS と同じ 2021-01-01）。
 const CLOCK_VALID_MIN_EPOCH_MS = 1609459200000;
@@ -86,8 +90,13 @@ const CRC32_TABLE: Uint32Array = (() => {
   return table;
 })();
 
-function crc32(bytes: Uint8Array): number {
-  let crc = 0xffffffff;
+/**
+ * 確定済み CRC32（prev、空のとき 0）に bytes を継ぎ足した確定 CRC32 を返す。
+ * stop-and-wait では 1 チャンクごとにこれで逐次更新し、毎リクエストで全バッファを
+ * 再計算する O(n^2) を避ける（prev を ^0xffffffff で「未確定状態」に戻して継続）。
+ */
+function crc32Append(prev: number, bytes: Uint8Array): number {
+  let crc = (prev ^ 0xffffffff) >>> 0;
   for (let i = 0; i < bytes.length; i++) {
     crc = (CRC32_TABLE[(crc ^ (bytes[i] ?? 0)) & 0xff] ?? 0) ^ (crc >>> 8);
   }
@@ -234,18 +243,32 @@ function controlPacket(cmd: number, fileId?: number): Uint8Array {
 
 /**
  * GET_FILE。offset/crcSeed を載せると、デバイスはその位置から続きを送る
- * （[cmd][u32 id][u32 offset][u32 crcSeed]、firmware/src/config.h 参照）。
+ * （[cmd][u32 id][u32 offset][u32 crcSeed][u8 gen]、firmware/src/config.h 参照）。
  * crcSeed は手元にある先頭 offset バイトの CRC32。esp_rom_crc32_le は LFSR の
  * 合成則を満たすので、デバイスが続きを積み上げても FILE_END のCRCはファイル全体と一致する。
+ * gen はこのリクエストの世代番号。デバイスは各 CHUNK/FILE_END にそのまま乗せ返すので、
+ * 直前の GET_FILE が BLE パイプラインに残した取りこぼしチャンク（接続スコープの同じ id を
+ * 持つ）を gen 不一致で確実に捨てられる。
  */
-function getFilePacket(fileId: number, offset: number, crcSeed: number): Uint8Array {
-  const packet = new Uint8Array(13);
+function getFilePacket(fileId: number, offset: number, crcSeed: number, gen: number): Uint8Array {
+  const packet = new Uint8Array(14);
   packet[0] = SYNC_CMD_GET_FILE;
   const dv = new DataView(packet.buffer);
   dv.setUint32(1, fileId, true);
   dv.setUint32(5, offset >>> 0, true);
   dv.setUint32(9, crcSeed >>> 0, true);
+  packet[13] = gen & 0xff;
   return packet;
+}
+
+// GET_FILE ごとに 1..255 を巡回して払い出す世代番号（0 は使わない: gen 非対応の旧ファーム
+// や残骸は gen=0 を返すので、常に不一致＝stale 扱いになる）。同期をまたいで単調に進めるので、
+// 連続するリクエストの世代は必ず異なる。
+let nextSyncGen = 1;
+function allocSyncGen(): number {
+  const gen = nextSyncGen;
+  nextSyncGen = (nextSyncGen % 255) + 1;
+  return gen;
 }
 
 /**
@@ -254,7 +277,8 @@ function getFilePacket(fileId: number, offset: number, crcSeed: number): Uint8Ar
  * 同じファイルなら接続をまたいで安定する。プロセス内メモリのみ保持するので、
  * アプリ強制終了時は失われ次回 0 から取り直す（安全側）。
  */
-type PartialTransfer = { buffer: Uint8Array; offset: number };
+// crc は buffer[0:offset] の確定 CRC32（次の GET_FILE の crcSeed に使い、毎回の全再計算を避ける）。
+type PartialTransfer = { buffer: Uint8Array; offset: number; crc: number };
 const partialTransfers = new Map<string, PartialTransfer>();
 const partialKey = (e: ManifestEntry) => `${e.type}:${e.epochMs}:${e.size}`;
 
@@ -331,29 +355,37 @@ class SyncChannel {
   }
 
   /**
-   * 1 ファイルを受信し、CRC32 とサイズを検証して返す。partial.offset > 0 なら
-   * その続きから受信を再開する（再接続後の途中再開）。受信したバイトは partial に
-   * 書き戻すので、失敗して reject しても呼び出し側が次回の再開に使える。CRC/サイズ
-   * 検証に失敗した場合だけは partial.offset を 0 に戻し、次回 0 から取り直させる。
+   * 1 ウィンドウ分（最大 SYNC_WINDOW_CHUNKS チャンク）を受信する。GET_FILE(offset) を 1 回送り、
+   * デバイスは最大 W チャンクを送って WINDOW_END（まだ続く）か FILE_END（最後）で停止する。
+   * BLE 通知は連続 push すると送受信スタック両方で落ちる（issue #74）ので、デバイスが窓ごとに
+   * 停止し、アプリがこのメソッドを繰り返し呼んで次の窓を引く＝フロー制御になっている。
+   *
+   * 受信バイトは partial.buffer / partial.offset に積み上げる。戻り値:
+   *  - { done: true }  全体完了（サイズ一致 + CRC 検証 OK）。
+   *  - { done: false } まだ続く（WINDOW_END、または欠落で未完の FILE_END）。呼び出し側が再要求する。
+   * 取りこぼした seq は黙ってスキップし、その分は次の窓で partial.offset から再要求して回収する。
+   * CRC 不一致のときだけ partial.offset を 0 に戻し（reject）、頭から取り直させる。
    */
-  fetchFile(
+  fetchWindow(
     entry: ManifestEntry,
     partial: PartialTransfer,
     onChunk: (bytes: number) => void,
-  ): Promise<Uint8Array> {
-    return new Promise<Uint8Array>((resolve, reject) => {
+  ): Promise<{ done: boolean }> {
+    return new Promise<{ done: boolean }>((resolve, reject) => {
       const buffer = partial.buffer;
-      let expectedSeq = 0;
+      const gen = allocSyncGen();
       let timer: ReturnType<typeof setTimeout> | null = null;
       const fail = (message: string) => {
         if (timer != null) clearTimeout(timer);
         this.handler = null;
-        this.log(`file ${entry.id} FAILED: ${message} (had ${partial.offset}/${entry.size} bytes)`);
+        this.log(
+          `file ${entry.id} window FAILED: ${message} (have ${partial.offset}/${entry.size})`,
+        );
         reject(new Error(message));
       };
       const arm = () => {
         if (timer != null) clearTimeout(timer);
-        timer = setTimeout(() => fail(`File ${entry.id} transfer timed out`), PACKET_TIMEOUT_MS);
+        timer = setTimeout(() => fail(`File ${entry.id} window timed out`), PACKET_TIMEOUT_MS);
       };
       this.handler = (packet) => {
         const type = packet[0];
@@ -362,62 +394,74 @@ class SyncChannel {
         }
         const v = view(packet);
         const id = v.getUint32(1, true);
-        if (id !== entry.id) return; // 直前のファイルの残骸は無視する
+        if (id !== entry.id) return; // 別ファイル宛の残骸は無視
         if (type === SYNC_PKT_ERROR) {
-          // デバイスが offset を拒否した（ファイルが変わった等）。手元の部分は破棄する。
-          partial.offset = 0;
+          partial.offset = 0; // デバイスが offset を拒否（ファイルが変わった等）→ 頭から
           fail(`Device reported file ${entry.id} unavailable`);
           return;
         }
         if (type === SYNC_PKT_CHUNK) {
-          arm();
+          if (v.getUint8(7) !== gen) return; // 前回 GET_FILE の残骸チャンク
           const seq = v.getUint16(5, true);
-          const payload = packet.subarray(7);
-          // 通知は接続内で順序保証されるので、欠落 = 取りこぼし確定。seq は GET_FILE
-          // ごとに 0 始まりで、payload は partial.offset の続きに積む。
-          if (seq !== expectedSeq || partial.offset + payload.length > buffer.length) {
-            fail(`File ${entry.id} chunk sequence broken at ${seq} (expected ${expectedSeq})`);
+          const payload = packet.subarray(8);
+          if (seq !== 0) return; // stop-and-wait は 1 リクエスト 1 チャンク。seq は常に 0。それ以外は残骸
+          if (partial.offset + payload.length > buffer.length) {
+            fail(`File ${entry.id} overflow at seq ${seq}`);
             return;
           }
+          // stop-and-wait: デバイスは 1 リクエスト 1 チャンクで止まる。これを受けたら
+          // CRC を継ぎ足して確定し、{done:false} で返す → 呼び出し側が次の offset を要求。
+          if (timer != null) clearTimeout(timer);
+          this.handler = null;
           buffer.set(payload, partial.offset);
           partial.offset += payload.length;
-          expectedSeq += 1;
-          // チャンクごとのログは多すぎるので 64 チャンク（≒数十 KB）ごとに心拍を出す。
-          // これが止まったら転送が途中で詰まっていることが分かる。
-          if (expectedSeq % 64 === 0) {
-            this.log(
-              `file ${entry.id} receiving: ${partial.offset}/${entry.size} bytes (seq ${seq})`,
-            );
-          }
+          partial.crc = crc32Append(partial.crc, payload);
           onChunk(payload.length);
+          resolve({ done: false });
           return;
         }
-        // SYNC_PKT_FILE_END
+        // SYNC_PKT_FILE_END（EOF。チャンクは無く、最後の確認だけ）
+        if (v.getUint8(9) !== gen) return; // 残骸 FILE_END は無視
         if (timer != null) clearTimeout(timer);
         this.handler = null;
         const expectedCrc = v.getUint32(5, true);
         if (partial.offset !== entry.size) {
+          // 取りこぼしで未完。reject せず再要求させる（partial.offset から続行）。
           this.log(
-            `file ${entry.id} FILE_END but incomplete: ${partial.offset}/${entry.size} bytes`,
+            `file ${entry.id} FILE_END incomplete ${partial.offset}/${entry.size} -> re-pull`,
           );
-          reject(new Error(`File ${entry.id} incomplete: ${partial.offset}/${entry.size} bytes`));
-        } else if (crc32(buffer) !== expectedCrc) {
-          partial.offset = 0; // 壊れているので部分を捨て、次回 0 から取り直す
-          this.log(`file ${entry.id} CRC mismatch (${entry.size} bytes received)`);
+          resolve({ done: false });
+        } else if (partial.crc !== expectedCrc) {
+          partial.offset = 0; // 壊れているので部分を捨て、頭から取り直す
+          partial.crc = 0;
+          this.log(`file ${entry.id} CRC mismatch (${entry.size} bytes)`);
           reject(new Error(`File ${entry.id} failed CRC check`));
         } else {
-          this.log(`file ${entry.id} OK (${entry.size} bytes, ${expectedSeq} chunks)`);
-          resolve(buffer);
+          this.log(`file ${entry.id} OK (${entry.size} bytes)`);
+          resolve({ done: true });
         }
       };
       arm();
-      // 続きから要求する場合は手元のバイトの CRC32 をシードとして渡す。
-      const crcSeed = partial.offset > 0 ? crc32(buffer.subarray(0, partial.offset)) : 0;
-      this.log(`-> GET_FILE id=${entry.id} offset=${partial.offset}/${entry.size}`);
+      // 続き（または再要求）は手元のバイトの確定 CRC32 をそのままシードに使う。
+      // stop-and-wait は 1 チャンク 1 リクエストなので、ここでは毎回ログを出さない。
       this.control
-        .write(getFilePacket(entry.id, partial.offset, crcSeed))
+        .write(getFilePacket(entry.id, partial.offset, partial.crc, gen))
         .catch((err) => fail(String(err)));
     });
+  }
+
+  /**
+   * 同期開始時の地ならし。前回の同期が中途で終わっていると、その転送のチャンクが
+   * BLE パイプライン（デバイスの TX キュー〜電波上〜OS の RX キュー）にまだ残っていて、
+   * 新しい GET_FILE の応答に先んじて届く。ABORT でデバイス側の転送を止め、ハンドラを
+   * 外したまま少し待って残骸を素通し（drain）させてから次フェーズに入る。gen 判定の
+   * 二重の保険であり、ABORT の制御書き込みはファーム側の「同期中」判定もリフレッシュする。
+   */
+  async reset(): Promise<void> {
+    this.handler = null;
+    await this.abort().catch(() => undefined);
+    await new Promise((resolve) => setTimeout(resolve, DRAIN_MS));
+    this.handler = null;
   }
 
   ack(fileId: number): Promise<void> {
@@ -464,7 +508,7 @@ export async function runDeviceSync(
   onProgress?: (progress: SyncProgress) => void,
 ): Promise<{ files: number; skipped: number; bytes: number }> {
   // 経過時間つきのトレースロガー。ファーム側の `[<millis>] sync:` ログと突き合わせて
-  // どこで転送が止まるか調べる。原因特定後はこのログ群ごと外せる。
+  // 転送の進行・停止箇所を追える（ファイル単位の粒度。チャンク単位のログは出さない）。
   const t0 = Date.now();
   const log = (message: string) => console.log(`[sync +${Date.now() - t0}ms] ${message}`);
 
@@ -486,6 +530,8 @@ export async function runDeviceSync(
   report();
 
   try {
+    // 前回の同期が残したチャンクを捨ててから始める（gen 判定の保険＋ファーム側の停止）。
+    await channel.reset();
     const manifest = await channel.requestManifest();
     // 音声のセッション分割が時系列前提なので、全体を撮影/録音時刻順に処理する。
     manifest.sort((a, b) => a.epochMs - b.epochMs);
@@ -512,7 +558,7 @@ export async function runDeviceSync(
       const key = partialKey(entry);
       let partial = partialTransfers.get(key);
       if (partial == null || partial.buffer.length !== entry.size) {
-        partial = { buffer: new Uint8Array(entry.size), offset: 0 };
+        partial = { buffer: new Uint8Array(entry.size), offset: 0, crc: 0 };
       }
       log(
         `file ${fileIndex}/${manifest.length} id=${entry.id} type=${entry.type} size=${
@@ -524,20 +570,27 @@ export async function runDeviceSync(
       // 再開分は受信済みとして進捗に反映（onChunk は今回の新規分だけ加算する）。
       progress.doneBytes = chunkBase + partial.offset;
       report();
-      for (let attempt = 0; attempt < FILE_RETRY_COUNT && bytes == null; attempt++) {
+      // ウィンドウ・プル：完了するまで窓を引き続ける。1 窓で 1 バイトも進まないことが
+      // 連続したら（全取りこぼし / タイムアウト）諦めてスキップし、次回の同期で再挑戦する。
+      let stalls = 0;
+      while (bytes == null && stalls <= MAX_WINDOW_STALLS) {
+        const before = partial.offset;
         try {
-          bytes = await channel.fetchFile(entry, partial, (n) => {
+          const r = await channel.fetchWindow(entry, partial, (n) => {
             progress.doneBytes += n;
             report();
           });
+          if (r.done) bytes = partial.buffer;
+          else if (partial.offset > before)
+            stalls = 0; // 進捗あり → 連続無進捗カウントをリセット
+          else stalls += 1; // この窓で 1 バイトも進まなかった
         } catch (err) {
-          console.warn(`Sync: file ${entry.id} attempt ${attempt + 1} failed`, err);
+          console.warn(`Sync: file ${entry.id} window failed`, err);
+          stalls += 1;
         }
       }
       if (bytes == null) {
-        log(
-          `file ${entry.id} SKIPPED after ${FILE_RETRY_COUNT} attempts (offset=${partial.offset})`,
-        );
+        log(`file ${entry.id} SKIPPED (stalled at offset=${partial.offset}/${entry.size})`);
         // 途中まで受信できていれば次回の再接続で続きから再開できるよう保持する。
         // 何も受信していない／CRC失敗で破棄された(offset=0)場合はキャッシュを残さない。
         if (partial.offset > 0 && partial.offset < entry.size) {
@@ -553,13 +606,34 @@ export async function runDeviceSync(
       }
       partialTransfers.delete(key);
 
+      // 空ファイル（撮影/録音の失敗で残ったゴミ）は永続化できない。デバイスから消すため
+      // ACK して飛ばす（残すと毎回の同期で再取得し続けてしまう）。
+      if (entry.size === 0) {
+        log(`file ${entry.id} empty (0 bytes) -> ACK & skip`);
+        await channel.ack(entry.id).catch(() => undefined);
+        skipped += 1;
+        progress.doneFiles += 1;
+        report();
+        continue;
+      }
+
       // デバイスの時計が一度も合わないまま録られたファイルの保険。firmware が
       // 接続時の TIME_SYNC で補正するため通常は通らない。
       const capturedAt = entry.epochMs >= CLOCK_VALID_MIN_EPOCH_MS ? entry.epochMs : Date.now();
-      if (entry.type === FILE_TYPE_AUDIO) {
-        ingestor.ingest(parseOppFrames(bytes), capturedAt);
-      } else if (entry.type === FILE_TYPE_PHOTO) {
-        persistPhoto(bytes, rotationFromOrientation(entry.orientation), capturedAt);
+      try {
+        if (entry.type === FILE_TYPE_AUDIO) {
+          ingestor.ingest(parseOppFrames(bytes), capturedAt);
+        } else if (entry.type === FILE_TYPE_PHOTO) {
+          persistPhoto(bytes, rotationFromOrientation(entry.orientation), capturedAt);
+        }
+      } catch (err) {
+        // 壊れた画像/音声などで永続化に失敗しても、1 ファイルで同期全体を止めない。
+        // ACK せずデバイスに残し（誤削除を避ける）、次のファイルへ進む。
+        console.warn(`Sync: file ${entry.id} persist failed, skipping (kept on device)`, err);
+        skipped += 1;
+        progress.doneFiles += 1;
+        report();
+        continue;
       }
 
       await channel.ack(entry.id);

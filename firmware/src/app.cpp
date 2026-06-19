@@ -142,6 +142,8 @@ static volatile uint32_t syncRequestedFileId = 0;
 // app's running CRC32 over the bytes it already holds (both 0 for a fresh fetch).
 static volatile uint32_t syncRequestedOffset = 0;
 static volatile uint32_t syncRequestedCrc = 0;
+// Generation tag from the latest GET_FILE; echoed in this request's CHUNK/FILE_END.
+static volatile uint8_t syncRequestedGen = 0;
 static volatile bool syncAbortRequested = false;
 static volatile bool syncPurgeRequested = false;
 // Delete-all in progress (reflected to the app via SYNC_FLAG_PURGING). Set while
@@ -159,6 +161,9 @@ static manifest_entry_t *syncFile = nullptr; // Entry currently being streamed
 static uint32_t syncFileOffset = 0;
 static uint16_t syncFileSeq = 0;
 static uint32_t syncFileCrc = 0;
+// Request generation echoed into every CHUNK/FILE_END so the app can drop
+// stragglers from a previous GET_FILE still draining through the BLE pipeline.
+static uint8_t syncFileGen = 0;
 // Debug counter: how many times the current file's chunk send hit a full TX buffer (congestion
 // backoff). Reset at file start, reported at FILE_END — a high count points at the BLE link, not SD.
 static uint32_t syncFileCongestion = 0;
@@ -997,11 +1002,15 @@ class SyncControlCallback : public BLECharacteristicCallbacks
                 syncRequestedOffset = 0;
                 syncRequestedCrc = 0;
             }
+            // gen (byte 13) tags this request so the app can ignore chunks left over
+            // from the previous GET_FILE. Legacy requests without it default to 0.
+            syncRequestedGen = (len >= 14) ? data[13] : 0;
             syncFileRequested = true;
-            SYNC_LOG("<- GET_FILE id=%lu offset=%lu crcSeed=%08lx",
+            SYNC_LOG("<- GET_FILE id=%lu offset=%lu crcSeed=%08lx gen=%u",
                      (unsigned long) syncRequestedFileId,
                      (unsigned long) syncRequestedOffset,
-                     (unsigned long) syncRequestedCrc);
+                     (unsigned long) syncRequestedCrc,
+                     (unsigned) syncRequestedGen);
             break;
         case SYNC_CMD_ACK_FILE: {
             uint8_t nextHead = (syncAckHead + 1) % 8;
@@ -1233,11 +1242,14 @@ void processSync()
                      (unsigned long) entry->size);
             syncSendFileError(syncRequestedFileId);
         } else {
-            SYNC_LOG("file %lu start (offset=%lu/%lu type=%u)",
-                     (unsigned long) entry->id,
-                     (unsigned long) syncRequestedOffset,
-                     (unsigned long) entry->size,
-                     entry->type);
+            // Stop-and-wait means one GET_FILE per chunk, so only log at the start of a file
+            // (offset 0) to keep the serial trace readable.
+            if (syncRequestedOffset == 0) {
+                SYNC_LOG("file %lu start (%lu bytes type=%u)",
+                         (unsigned long) entry->id,
+                         (unsigned long) entry->size,
+                         entry->type);
+            }
             syncFile = entry;
             // Resume from the app's offset, seeding the running CRC with the app's
             // CRC over the bytes it already has. seq always restarts at 0 for the
@@ -1245,6 +1257,7 @@ void processSync()
             syncFileOffset = syncRequestedOffset;
             syncFileSeq = 0;
             syncFileCrc = syncRequestedCrc;
+            syncFileGen = syncRequestedGen;
             syncFileCongestion = 0;
             syncState = SYNC_SENDING_FILE;
         }
@@ -1296,51 +1309,51 @@ void processSync()
     }
 
     if (syncState == SYNC_SENDING_FILE && syncFile != nullptr) {
-        size_t payloadMax = syncMaxValue() - 7; // [type][u32 id][u16 seq]
-        for (int burst = 0; burst < SYNC_CHUNKS_PER_LOOP && syncState == SYNC_SENDING_FILE; burst++) {
-            if (syncFileOffset >= syncFile->size) {
-                syncTxBuffer[0] = SYNC_PKT_FILE_END;
-                memcpy(&syncTxBuffer[1], &syncFile->id, 4);
-                memcpy(&syncTxBuffer[5], &syncFileCrc, 4);
-                if (!syncNotify(9)) {
-                    syncFileCongestion++;
-                    delay(SYNC_CONGESTION_BACKOFF_MS); // resend FILE_END next pass
-                    break;
-                }
-                SYNC_LOG("file %lu sent (%lu bytes, crc=%08lx, %lu congestion backoffs)",
-                         (unsigned long) syncFile->id,
-                         (unsigned long) syncFile->size,
-                         (unsigned long) syncFileCrc,
-                         (unsigned long) syncFileCongestion);
-                syncFile = nullptr;
-                syncState = SYNC_IDLE;
-                break;
-            }
-            int n = storage_read_file(syncFile->path, syncFileOffset, &syncTxBuffer[7], payloadMax);
+        // Stop-and-wait: emit EXACTLY ONE packet per GET_FILE, then go idle and wait for
+        // the app to request the next offset. This is the issue #74 fix. BLE notifications
+        // are not a reliable bulk-transfer primitive here: when the device pushes several
+        // notifications back-to-back, the central (react-native-ble-plx on Android, and the
+        // NimBLE TX path) drops all but the LAST one — every multi-chunk burst we tried
+        // (delay 0/15/50 ms, windows of 8) delivered only the final packet. The one packet
+        // that immediately precedes going idle DOES arrive reliably, so we make every chunk
+        // that packet. The app paces by acknowledging each one with the next GET_FILE.
+        size_t payloadMax = syncMaxValue() - 8; // [type][u32 id][u16 seq][u8 gen]
+        if (payloadMax > SYNC_CHUNK_PAYLOAD_MAX) {
+            payloadMax = SYNC_CHUNK_PAYLOAD_MAX; // cap below the MTU; full-MTU notifications get dropped
+        }
+        if (syncFileOffset >= syncFile->size) {
+            syncTxBuffer[0] = SYNC_PKT_FILE_END;
+            memcpy(&syncTxBuffer[1], &syncFile->id, 4);
+            memcpy(&syncTxBuffer[5], &syncFileCrc, 4);
+            syncTxBuffer[9] = syncFileGen;
+            syncNotify(10);
+            SYNC_LOG("file %lu FILE_END sent (%lu bytes, crc=%08lx)",
+                     (unsigned long) syncFile->id,
+                     (unsigned long) syncFile->size,
+                     (unsigned long) syncFileCrc);
+            syncFile = nullptr;
+            syncState = SYNC_IDLE;
+        } else {
+            int n = storage_read_file(syncFile->path, syncFileOffset, &syncTxBuffer[8], payloadMax);
             if (n <= 0) {
                 SYNC_LOG("file %lu -> ERROR (SD read failed at offset %lu, n=%d)",
                          (unsigned long) syncFile->id,
                          (unsigned long) syncFileOffset,
                          n);
                 syncSendFileError(syncFile->id);
-                syncFile = nullptr;
-                syncState = SYNC_IDLE;
-                break;
+            } else {
+                syncTxBuffer[0] = SYNC_PKT_CHUNK;
+                memcpy(&syncTxBuffer[1], &syncFile->id, 4);
+                memcpy(&syncTxBuffer[5], &syncFileSeq, 2);
+                syncTxBuffer[7] = syncFileGen;
+                syncNotify(8 + n);
+                syncFileCrc = esp_rom_crc32_le(syncFileCrc, &syncTxBuffer[8], n);
+                syncFileOffset += n;
+                syncFileSeq++;
             }
-            syncTxBuffer[0] = SYNC_PKT_CHUNK;
-            memcpy(&syncTxBuffer[1], &syncFile->id, 4);
-            memcpy(&syncTxBuffer[5], &syncFileSeq, 2);
-            if (!syncNotify(7 + n)) {
-                // Dropped by a full TX buffer: leave offset/seq/CRC untouched so
-                // the same chunk re-reads and resends next pass (no data loss).
-                syncFileCongestion++;
-                delay(SYNC_CONGESTION_BACKOFF_MS);
-                break;
-            }
-            syncFileCrc = esp_rom_crc32_le(syncFileCrc, &syncTxBuffer[7], n);
-            syncFileOffset += n;
-            syncFileSeq++;
-            delay(SYNC_CHUNK_DELAY_MS);
+            // One packet sent (or read error): go idle. The app pulls the next offset.
+            syncFile = nullptr;
+            syncState = SYNC_IDLE;
         }
     }
 }

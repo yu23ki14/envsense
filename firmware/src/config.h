@@ -180,12 +180,17 @@ typedef enum {
 // count and it resets FAT directory bloat. Set to 1 for a ONE-SHOT recovery flash
 // to wipe a card too bloated to even scan at boot, then set back to 0.
 #define STORAGE_FORMAT_ON_BOOT 0
-#define SYNC_CHUNKS_PER_LOOP                                                                                           \
-    40 // Max file chunks attempted per loop_app() pass (a full burst owns core0 only
-       // briefly; capture is paused during a sync session, so larger bursts are safe)
-#define SYNC_CHUNK_DELAY_MS                                                                                            \
-    0 // No fixed inter-chunk pause: syncNotify() detects a full TX buffer and the
-      // congestion backoff below handles flushing, so a blind 1ms delay only wasted time
+// File transfer is stop-and-wait: one packet per GET_FILE (see SYNC_PKT_FILE_END comment). These two
+// only pace the MANIFEST stream now (small: a handful of packets), not the file chunks.
+#define SYNC_CHUNKS_PER_LOOP 8 // Manifest entries' packets attempted per loop_app() pass
+#define SYNC_CHUNK_DELAY_MS 4  // Inter-packet pause while streaming the manifest
+// Max chunk PAYLOAD bytes, capped below the ATT MTU. A full MTU-sized notification (514 B at MTU
+// 517) was silently dropped by the central on this link; only packets ≲345 B arrived reliably
+// (the 326 B manifest packet, partial last chunks, FILE_END). Likely no BLE Data Length Extension,
+// so a large notification fragments across many LL packets and the central drops it. 320 stays
+// within the proven-good range with margin. Larger values risk dropping the whole transfer — retest
+// before raising.
+#define SYNC_CHUNK_PAYLOAD_MAX 320
 #define SYNC_CONGESTION_BACKOFF_MS                                                                                     \
     5 // Wait after a notify is rejected (TX buffer full) before resending — under one connection interval so throughput
       // stays high
@@ -255,11 +260,14 @@ typedef enum {
 // SYNC_CONTROL (write): [cmd, ...]
 #define SYNC_CMD_MANIFEST 0x01 // [cmd] -> manifest entries stream over SYNC_DATA
 #define SYNC_CMD_GET_FILE                                                                                              \
-    0x02                       // [cmd][u32 fileId]([u32 offset][u32 crcSeed]) -> file chunks stream over SYNC_DATA.
-                               // The trailing offset+crcSeed are optional (legacy 5-byte form = 0/0): they let the app
-                               // resume a partially-received file after a reconnect. offset = bytes already held by the
-                               // app; crcSeed = the app's running CRC32 over those bytes (the FILE_END crc still covers
-                               // the whole file because esp_rom_crc32_le composes incrementally).
+    0x02 // [cmd][u32 fileId]([u32 offset][u32 crcSeed][u8 gen]) -> file chunks stream over SYNC_DATA.
+         // The trailing offset+crcSeed are optional (legacy 5-byte form = 0/0): they let the app
+         // resume a partially-received file after a reconnect. offset = bytes already held by the
+         // app; crcSeed = the app's running CRC32 over those bytes (the FILE_END crc still covers
+         // the whole file because esp_rom_crc32_le composes incrementally).
+         // gen (optional, byte 13) is a request generation the device echoes in every CHUNK/FILE_END
+         // (see below) so the app can discard stragglers from a previous GET_FILE that are still
+         // draining through the BLE pipeline when a new request starts. Omitted (<14 bytes) = 0.
 #define SYNC_CMD_ACK_FILE 0x03 // [cmd][u32 fileId] -> file verified by the app; delete from SD
 #define SYNC_CMD_ABORT 0x04    // [cmd] -> stop the current transfer
 #define SYNC_CMD_PURGE 0x05    // [cmd] -> delete ALL unsynced files without transferring
@@ -267,9 +275,17 @@ typedef enum {
 // SYNC_DATA (notify): first byte is the packet type
 #define SYNC_PKT_MANIFEST_END 0x00 // [type][u16 entryCount]
 #define SYNC_PKT_MANIFEST 0x01 // [type][u8 n] then n * ([u32 id][u8 fileType][u32 size][u64 epochMs][u8 orientation])
-#define SYNC_PKT_CHUNK 0x02    // [type][u32 id][u16 seq][payload...]
-#define SYNC_PKT_FILE_END 0x03 // [type][u32 id][u32 crc32(IEEE)]
-#define SYNC_PKT_ERROR 0x7F    // [type][u32 id] -- requested file unavailable
+#define SYNC_PKT_CHUNK 0x02    // [type][u32 id][u16 seq][u8 gen][payload...] (seq is always 0: one chunk per request)
+#define SYNC_PKT_FILE_END 0x03 // [type][u32 id][u32 crc32(IEEE)][u8 gen]
+// File transfer is STOP-AND-WAIT: the device sends exactly ONE packet per GET_FILE (one CHUNK, or
+// FILE_END at EOF), then goes idle and waits for the app to request the next offset. This is the
+// issue #74 fix. BLE notifications are not a reliable bulk-transfer primitive here: when the device
+// pushes notifications back-to-back, the central (react-native-ble-plx on Android, and the NimBLE TX
+// path) drops all but the LAST — every multi-chunk burst we tried (delay 0/15/50 ms, 8-chunk windows)
+// delivered only the final packet. The single packet that immediately precedes going idle DOES arrive
+// reliably, so every chunk is made that packet and the app paces by acknowledging each with the next
+// GET_FILE(offset). 0x04 is reserved (was a multi-chunk window-end marker, dropped with windowing).
+#define SYNC_PKT_ERROR 0x7F // [type][u32 id] -- requested file unavailable
 #define SYNC_MANIFEST_ENTRY_BYTES 18
 #define SYNC_FILE_TYPE_AUDIO 0
 #define SYNC_FILE_TYPE_PHOTO 1
