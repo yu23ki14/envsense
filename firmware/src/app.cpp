@@ -8,7 +8,9 @@
 
 #include "config.h" // Use config.h for all configurations
 #include "driver/rtc_io.h"
-#include "driver/touch_sensor.h" // IDF legacy touch_pad_* (Arduino touch HAL removed on S3 in IDF 5.5; v2 driver migration tracked in #72)
+#include "driver/touch_sens.h" // IDF v2 touch sensor driver (esp_driver_touch_sens) - the
+                               // legacy touch_pad_* driver's deep-sleep wake is broken on the
+                               // S3 under IDF 5.5 (FSM dies in deep sleep); v2 supports it (#72).
 #include "esp_camera.h"
 #include "esp_rom_crc.h"
 #include "esp_sleep.h"
@@ -27,10 +29,14 @@ volatile bool buttonPressed = false;
 unsigned long buttonPressTime = 0;
 led_status_t ledMode = LED_BOOT_SEQUENCE;
 
-// Copper-foil touch sensor state (GPIO3 / TOUCH3)
-RTC_DATA_ATTR uint32_t touchBaseline = 0; // Survives deep sleep; calibrated on cold boot
-bool touchWaitRelease = false;            // After a touch wake-up, ignore the foil until released
-volatile bool touchDebugLed = false;      // TOUCH_DEBUG_LOG: mirror the touch state on the LED
+// Copper-foil touch sensor state (GPIO3 / TOUCH3) - IDF v2 touch_sensor driver.
+// The driver maintains the benchmark and does active/hysteresis/debounce itself,
+// so the active state is tracked from its callbacks instead of a software EMA.
+static touch_sensor_handle_t touchSensor = NULL;
+static touch_channel_handle_t touchChannel = NULL;
+volatile bool touchActive = false;   // Set by the on_active / on_inactive callbacks
+bool touchWaitRelease = false;       // After a touch wake-up, ignore the foil until released
+volatile bool touchDebugLed = false; // TOUCH_DEBUG_LOG: mirror the touch state on the LED
 
 // BLE power commands, deferred to the main loop so the write response is sent
 // before the BLE stack is torn down (see PowerControlCallback)
@@ -144,6 +150,8 @@ static volatile uint32_t syncRequestedOffset = 0;
 static volatile uint32_t syncRequestedCrc = 0;
 // Generation tag from the latest GET_FILE; echoed in this request's CHUNK/FILE_END.
 static volatile uint8_t syncRequestedGen = 0;
+// How many chunks the app wants for this request (1..SYNC_WINDOW_CHUNKS_MAX). 1 = legacy stop-and-wait.
+static volatile uint8_t syncRequestedWindow = 1;
 static volatile bool syncAbortRequested = false;
 static volatile bool syncPurgeRequested = false;
 // Delete-all in progress (reflected to the app via SYNC_FLAG_PURGING). Set while
@@ -159,8 +167,13 @@ static bool syncManifestBuilt = false;
 static int syncManifestSendIndex = 0;
 static manifest_entry_t *syncFile = nullptr; // Entry currently being streamed
 static uint32_t syncFileOffset = 0;
-static uint16_t syncFileSeq = 0;
 static uint32_t syncFileCrc = 0;
+// File id + offset that syncFileCrc is a valid running CRC32 up to. When the next GET_FILE resumes
+// from exactly here (the app received the previous window in full), we keep accumulating an
+// independent CRC over the SD bytes; otherwise (a dropped chunk moved the app's offset back, or a
+// different file) we re-seed syncFileCrc from the app's crcSeed.
+static uint32_t syncFileSentOffset = 0;
+static uint32_t syncFileSentId = 0;
 // Request generation echoed into every CHUNK/FILE_END so the app can drop
 // stragglers from a previous GET_FILE still draining through the BLE pipeline.
 static uint8_t syncFileGen = 0;
@@ -168,6 +181,10 @@ static uint8_t syncFileGen = 0;
 // backoff). Reset at file start, reported at FILE_END — a high count points at the BLE link, not SD.
 static uint32_t syncFileCongestion = 0;
 static uint8_t syncTxBuffer[BLE_MTU_SIZE];
+// Staging for one window: chunks are read forward (to fold the running CRC in offset order) but sent
+// in reverse seq order, so all of a window's payloads must be held at once. Sized for the largest
+// window of full-payload chunks.
+static uint8_t syncWindowBuf[SYNC_WINDOW_CHUNKS_MAX * SYNC_CHUNK_PAYLOAD_MAX];
 // Set by SyncDataStatusCallback when a notify is rejected because the
 // controller TX buffer is full. notify() reports this synchronously via
 // onStatus(ERROR_GATT), so processSync() can read it right after notify().
@@ -369,151 +386,148 @@ void handleButton()
 // -------------------------------------------------------------------------
 // Touch Handling (copper foil on GPIO3 / TOUCH3)
 // -------------------------------------------------------------------------
-static inline uint32_t touchOnThreshold()
+// The driver fires these from its event task whenever the foil channel crosses
+// the active / inactive threshold. They only flip a flag the main loop reads.
+static bool IRAM_ATTR touchOnActive(touch_sensor_handle_t sens, const touch_active_event_data_t *event, void *ctx)
 {
-    return (uint32_t) (touchBaseline * (1.0f + TOUCH_TOUCH_RATIO));
-}
-
-static inline uint32_t touchOffThreshold()
-{
-    return (uint32_t) (touchBaseline * (1.0f + TOUCH_RELEASE_RATIO));
-}
-
-// One raw capacitance read of the foil channel via the IDF legacy driver. On
-// the ESP32-S3 the channel id equals the GPIO number, so TOUCH_SENSE_PIN (GPIO3)
-// is TOUCH_PAD_NUM3. A touch raises the value, matching the old touchRead scale.
-static uint32_t touchReadRaw()
-{
-    uint32_t raw = 0;
-    touch_pad_read_raw_data((touch_pad_t) TOUCH_SENSE_PIN, &raw);
-    return raw;
-}
-
-// Median of TOUCH_FILTER_SAMPLES raw reads; on battery power single samples
-// spike too much (camera / BLE load on the supply rail) to act on directly.
-static uint32_t touchReadFiltered()
-{
-    uint32_t s[TOUCH_FILTER_SAMPLES];
-    for (int i = 0; i < TOUCH_FILTER_SAMPLES; i++) {
-        s[i] = touchReadRaw();
+    if (event->chan_id == TOUCH_SENSE_PIN) {
+        touchActive = true;
     }
-    // Insertion sort - the array is tiny
-    for (int i = 1; i < TOUCH_FILTER_SAMPLES; i++) {
-        uint32_t v = s[i];
-        int j = i - 1;
-        while (j >= 0 && s[j] > v) {
-            s[j + 1] = s[j];
-            j--;
-        }
-        s[j + 1] = v;
-    }
-    return s[TOUCH_FILTER_SAMPLES / 2];
+    return false;
 }
+
+static bool IRAM_ATTR touchOnInactive(touch_sensor_handle_t sens, const touch_inactive_event_data_t *event, void *ctx)
+{
+    if (event->chan_id == TOUCH_SENSE_PIN) {
+        touchActive = false;
+    }
+    return false;
+}
+
+// Log each touch driver call's result instead of aborting (ESP_ERROR_CHECK), so
+// a config failure surfaces over serial instead of bricking boot in a panic loop.
+#define TOUCH_TRY(call)                                                                                                \
+    do {                                                                                                               \
+        esp_err_t _e = (call);                                                                                         \
+        Serial.printf("  touch: " #call " -> %d (%s)\n", (int) _e, esp_err_to_name(_e));                               \
+        Serial.flush();                                                                                                \
+    } while (0)
 
 void setupTouch()
 {
-    // IDF 5.5 removed the Arduino touch HAL on the ESP32-S3, so drive the copper
-    // foil through the IDF legacy touch_pad_* driver. Longer charge integration
-    // than the default gives a better SNR, required for the low thresholds that
-    // battery-powered (floating-ground) touch needs.
-    touch_pad_init();
-    touch_pad_set_fsm_mode(TOUCH_FSM_MODE_TIMER);
-    touch_pad_config((touch_pad_t) TOUCH_SENSE_PIN);
-    touch_pad_set_charge_discharge_times(TOUCH_MEASURE_CYCLES);
-    touch_pad_set_measurement_interval(TOUCH_SLEEP_CYCLES);
-    touch_pad_fsm_start();
-    delay(10); // Let the FSM complete a few measurements before the first read
+    // IDF v2 touch sensor driver. The controller scans the foil channel
+    // continuously; the driver maintains the benchmark and raises active /
+    // inactive events through TOUCH_ACTIVE_THRESH (a delta above the benchmark).
+    Serial.println("setupTouch (v2) starting...");
+    Serial.flush();
+    // [DIAGNOSTIC] Wait for USB CDC to enumerate so the per-call TOUCH_TRY logs
+    // below flush live before any crash (setup-phase logs are otherwise lost).
+    delay(2500);
+    Serial.println("setupTouch: USB settle done, starting v2 init");
+    Serial.flush();
+    touch_sensor_sample_config_t sampleCfg =
+        TOUCH_SENSOR_V2_DEFAULT_SAMPLE_CONFIG(TOUCH_CHARGE_TIMES, TOUCH_VOLT_LIM_L_0V5, TOUCH_VOLT_LIM_H_2V2);
+    touch_sensor_config_t ctrlCfg = TOUCH_SENSOR_DEFAULT_BASIC_CONFIG(1, &sampleCfg);
+    TOUCH_TRY(touch_sensor_new_controller(&ctrlCfg, &touchSensor));
 
-    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TOUCHPAD && touchBaseline > 0) {
-        // Woken by the foil: keep the baseline stored in RTC memory and ignore
-        // the touch still in progress so we don't immediately power off again.
+    touch_sensor_filter_config_t filterCfg = TOUCH_SENSOR_DEFAULT_FILTER_CONFIG();
+    TOUCH_TRY(touch_sensor_config_filter(touchSensor, &filterCfg));
+
+    // Internal denoise channel suppresses background noise (consumes no GPIO).
+    touch_denoise_chan_config_t denoiseCfg = {
+        .charge_speed = TOUCH_CHARGE_SPEED_7,
+        .init_charge_volt = TOUCH_INIT_CHARGE_VOLT_DEFAULT,
+        .ref_cap = TOUCH_DENOISE_CHAN_CAP_5PF,
+        .resolution = TOUCH_DENOISE_CHAN_RESOLUTION_BIT4,
+    };
+    TOUCH_TRY(touch_sensor_config_denoise_channel(touchSensor, &denoiseCfg));
+
+    touch_channel_config_t chanCfg = {
+        .active_thresh = {TOUCH_ACTIVE_THRESH},
+        .charge_speed = TOUCH_CHARGE_SPEED_7,
+        .init_charge_volt = TOUCH_INIT_CHARGE_VOLT_DEFAULT,
+    };
+    // On the ESP32-S3 the channel id equals the GPIO number, so GPIO3 == channel 3.
+    TOUCH_TRY(touch_sensor_new_channel(touchSensor, TOUCH_SENSE_PIN, &chanCfg, &touchChannel));
+
+    // Wake from deep sleep on touch. The default deep-sleep config keeps RTC_PERIPH
+    // powered, so the power button's ext1 wake-up keeps working too; any enabled
+    // channel (i.e. the foil) can then wake the chip from deep sleep.
+    touch_sleep_config_t slpCfg = TOUCH_SENSOR_DEFAULT_DSLP_CONFIG();
+    TOUCH_TRY(touch_sensor_config_sleep_wakeup(touchSensor, &slpCfg));
+
+    touch_event_callbacks_t cbs = {
+        .on_active = touchOnActive,
+        .on_inactive = touchOnInactive,
+    };
+    TOUCH_TRY(touch_sensor_register_callbacks(touchSensor, &cbs, NULL));
+
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TOUCHPAD) {
+        // Woken by the foil: ignore the touch still in progress so we don't
+        // immediately treat it as a fresh power-off hold.
         touchWaitRelease = true;
-    } else {
-        // Cold boot or button wake: calibrate assuming the foil is untouched.
-        for (int i = 0; i < 4; i++) {
-            touchReadRaw(); // Discard warm-up readings
-        }
-        uint64_t sum = 0;
-        for (int i = 0; i < TOUCH_BASELINE_SAMPLES; i++) {
-            sum += touchReadRaw();
-            delay(10);
-        }
-        touchBaseline = (uint32_t) (sum / TOUCH_BASELINE_SAMPLES);
     }
-    Serial.printf("Touch baseline: %lu, on/off thresholds: %lu / %lu\n",
-                  (unsigned long) touchBaseline,
-                  (unsigned long) touchOnThreshold(),
-                  (unsigned long) touchOffThreshold());
+
+    TOUCH_TRY(touch_sensor_enable(touchSensor));
+    TOUCH_TRY(touch_sensor_start_continuous_scanning(touchSensor));
+    delay(50); // Let the benchmark settle before the first reading is meaningful
+
+    uint32_t benchmark[TOUCH_SAMPLE_CFG_NUM] = {0};
+    if (touchChannel) {
+        touch_channel_read_data(touchChannel, TOUCH_CHAN_DATA_TYPE_BENCHMARK, benchmark);
+    }
+    Serial.printf(
+        "Touch ready (v2): benchmark %lu, active_thresh %d\n", (unsigned long) benchmark[0], (int) TOUCH_ACTIVE_THRESH);
+    Serial.flush();
 }
 
 void handleTouch()
 {
     unsigned long now = millis();
-    static unsigned long lastSampleTime = 0;
     static unsigned long touchStartTime = 0;
     static bool touchDown = false;
-    static bool touched = false;
-    static float baselineF = 0.0f;
-
-    if (touchBaseline == 0 || now - lastSampleTime < TOUCH_SAMPLE_INTERVAL_MS) {
-        return;
-    }
-    lastSampleTime = now;
-    if (baselineF == 0.0f) {
-        baselineF = (float) touchBaseline;
-    }
-
-    uint32_t filtered = touchReadFiltered();
-
-    // Hysteresis: entering the touched state takes a higher value than leaving
-    // it, so readings hovering near a single threshold don't chatter.
-    if (!touched && filtered > touchOnThreshold()) {
-        touched = true;
-    } else if (touched && filtered < touchOffThreshold()) {
-        touched = false;
-    }
-
-    // While released, track drift (temperature / battery voltage / mounting)
-    // with a slow EMA so the relative thresholds stay valid. Frozen while
-    // touched, and asymmetric otherwise: upward movement is tracked 10x
-    // slower so a sub-threshold touch (the shrunken delta when running on
-    // battery with a floating ground) is not absorbed into the baseline.
-    if (!touched && !touchWaitRelease) {
-        float err = (float) filtered - baselineF;
-        baselineF += err * (err < 0 ? TOUCH_BASELINE_ALPHA : TOUCH_BASELINE_ALPHA_UP);
-        touchBaseline = (uint32_t) baselineF; // RTC copy also feeds the deep-sleep wake threshold
-    }
+    bool active = touchActive;
 
 #if TOUCH_DEBUG_LOG
-    touchDebugLed = touched;
+    touchDebugLed = active;
     static unsigned long lastLogTime = 0;
     if (now - lastLogTime >= 1000) {
-        Serial.printf("Touch filtered: %lu baseline: %lu (on: %lu / off: %lu)\n",
-                      (unsigned long) filtered,
-                      (unsigned long) touchBaseline,
-                      (unsigned long) touchOnThreshold(),
-                      (unsigned long) touchOffThreshold());
+        uint32_t raw[TOUCH_SAMPLE_CFG_NUM] = {0};
+        uint32_t smooth[TOUCH_SAMPLE_CFG_NUM] = {0};
+        uint32_t bm[TOUCH_SAMPLE_CFG_NUM] = {0};
+        if (touchChannel) {
+            touch_channel_read_data(touchChannel, TOUCH_CHAN_DATA_TYPE_RAW, raw);
+            touch_channel_read_data(touchChannel, TOUCH_CHAN_DATA_TYPE_SMOOTH, smooth);
+            touch_channel_read_data(touchChannel, TOUCH_CHAN_DATA_TYPE_BENCHMARK, bm);
+        }
+        Serial.printf("Touch raw:%lu smooth:%lu benchmark:%lu delta:%ld active:%d\n",
+                      (unsigned long) raw[0],
+                      (unsigned long) smooth[0],
+                      (unsigned long) bm[0],
+                      (long) smooth[0] - (long) bm[0],
+                      (int) active);
         lastLogTime = now;
     }
 #endif
 
+    // After a touch wake-up, wait for the foil to be released before acting.
     if (touchWaitRelease) {
-        if (!touched) {
+        if (!active) {
             touchWaitRelease = false;
         }
         return;
     }
 
-    if (touched && !touchDown) {
+    if (active && !touchDown) {
         touchDown = true;
         touchStartTime = now;
-    } else if (touched && touchDown) {
-        // A short touch does nothing; only a continuous hold powers off
+    } else if (active && touchDown) {
+        // A short touch does nothing; only a continuous hold powers off.
         if (now - touchStartTime >= TOUCH_HOLD_OFF_MS && ledMode != LED_POWER_OFF_SEQUENCE) {
             Serial.println("Touch hold detected - powering off");
             ledMode = LED_POWER_OFF_SEQUENCE;
         }
-    } else if (!touched) {
+    } else if (!active) {
         touchDown = false;
     }
 }
@@ -568,16 +582,23 @@ void shutdownDevice()
     rtc_gpio_pulldown_dis((gpio_num_t) POWER_BUTTON_PIN);
     esp_sleep_enable_ext1_wakeup(1ULL << POWER_BUTTON_PIN, ESP_EXT1_WAKEUP_ALL_LOW);
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
-    // Wake when the foil's reading rises far enough above its benchmark. The
-    // IDF sleep threshold is a *delta above the hardware-tracked benchmark*
-    // (touch_pad_set_thresh: "the original value of the trigger state minus the
-    // benchmark"), not an absolute level like the in-loop detector's
-    // touchOnThreshold(). So pass baseline * ratio (the rise a touch produces),
-    // not baseline * (1 + ratio) -- the latter is ~baseline counts and a finger
-    // never lifts the reading that far, so the device would never wake.
-    touch_pad_sleep_channel_enable((touch_pad_t) TOUCH_SENSE_PIN, true);
-    touch_pad_sleep_set_threshold((touch_pad_t) TOUCH_SENSE_PIN, (uint32_t) (touchBaseline * TOUCH_TOUCH_RATIO));
-    esp_sleep_enable_touchpad_wakeup();
+
+    // Power-off is triggered by a 2s hold, so the finger is still on the foil when
+    // we get here. Wait for it to be released first, otherwise the held touch is
+    // already "active" at sleep entry and the chip wakes again immediately. Bounded
+    // by a timeout so a stuck/grounded foil still sleeps. The v2 touch controller
+    // keeps scanning and its callbacks keep updating touchActive during this wait.
+    {
+        unsigned long waitStart = millis();
+        while (touchActive && millis() - waitStart < 5000) {
+            delay(20);
+        }
+    }
+
+    // The touch wake-up source was configured in setupTouch() via
+    // touch_sensor_config_sleep_wakeup() and the controller is still scanning, so
+    // the foil can wake the chip from deep sleep. The power button (ext1) works too
+    // because RTC_PERIPH is kept powered above.
     Serial.println("Entering deep sleep...");
     delay(100);
     esp_deep_sleep_start();
@@ -1005,12 +1026,24 @@ class SyncControlCallback : public BLECharacteristicCallbacks
             // gen (byte 13) tags this request so the app can ignore chunks left over
             // from the previous GET_FILE. Legacy requests without it default to 0.
             syncRequestedGen = (len >= 14) ? data[13] : 0;
+            // window (byte 14) is how many chunks to send for this request. Clamp to the supported
+            // range; legacy requests without it fall back to 1 (stop-and-wait).
+            {
+                uint8_t w = (len >= 15) ? data[14] : 1;
+                if (w < 1) {
+                    w = 1;
+                } else if (w > SYNC_WINDOW_CHUNKS_MAX) {
+                    w = SYNC_WINDOW_CHUNKS_MAX;
+                }
+                syncRequestedWindow = w;
+            }
             syncFileRequested = true;
-            SYNC_LOG("<- GET_FILE id=%lu offset=%lu crcSeed=%08lx gen=%u",
+            SYNC_LOG("<- GET_FILE id=%lu offset=%lu crcSeed=%08lx gen=%u window=%u",
                      (unsigned long) syncRequestedFileId,
                      (unsigned long) syncRequestedOffset,
                      (unsigned long) syncRequestedCrc,
-                     (unsigned) syncRequestedGen);
+                     (unsigned) syncRequestedGen,
+                     (unsigned) syncRequestedWindow);
             break;
         case SYNC_CMD_ACK_FILE: {
             uint8_t nextHead = (syncAckHead + 1) % 8;
@@ -1145,6 +1178,22 @@ static bool syncNotify(size_t len)
     return !syncTxFull;
 }
 
+// Manifest keep-alive, called from storage_build_manifest while it scans the SD directory. Sends a
+// 0-entry SYNC_PKT_MANIFEST: the app re-arms its manifest timer and appends nothing, so a multi-second
+// scan no longer looks like a dead link. The notify also refreshes lastSyncActivityMs, which keeps the
+// sync session active so the firmware doesn't resume capture mid-scan. Safe to reuse syncTxBuffer here:
+// the manifest send loop runs in the same single-threaded loop_app(), never concurrently with the scan.
+static void syncManifestHeartbeat(int scanned)
+{
+    if (!connected || syncDataCharacteristic == nullptr) {
+        return;
+    }
+    syncTxBuffer[0] = SYNC_PKT_MANIFEST;
+    syncTxBuffer[1] = 0; // 0 entries
+    syncNotify(2);
+    SYNC_LOG("manifest scan keep-alive (%d files so far)", scanned);
+}
+
 // Drives the sync transfer a bounded amount per loop_app() pass so the touch
 // sensor / button / photo capture stay responsive during multi-minute syncs.
 void processSync()
@@ -1217,7 +1266,10 @@ void processSync()
             syncManifest = (manifest_entry_t *) ps_malloc(SYNC_MANIFEST_MAX_ENTRIES * sizeof(manifest_entry_t));
         }
         if (syncManifest != nullptr) {
-            syncManifestCount = storage_build_manifest(syncManifest, SYNC_MANIFEST_MAX_ENTRIES);
+            // Pulse a keep-alive before the scan (covers the directory open) and let the scan pulse
+            // more via the callback, so the app's manifest timer survives a multi-second build.
+            syncManifestHeartbeat(0);
+            syncManifestCount = storage_build_manifest(syncManifest, SYNC_MANIFEST_MAX_ENTRIES, syncManifestHeartbeat);
             syncManifestBuilt = true;
             syncManifestSendIndex = 0;
             syncState = SYNC_SENDING_MANIFEST;
@@ -1242,8 +1294,8 @@ void processSync()
                      (unsigned long) entry->size);
             syncSendFileError(syncRequestedFileId);
         } else {
-            // Stop-and-wait means one GET_FILE per chunk, so only log at the start of a file
-            // (offset 0) to keep the serial trace readable.
+            // Only log at the start of a file (offset 0) to keep the serial trace readable; a
+            // windowed transfer issues one GET_FILE per window, not per chunk.
             if (syncRequestedOffset == 0) {
                 SYNC_LOG("file %lu start (%lu bytes type=%u)",
                          (unsigned long) entry->id,
@@ -1251,12 +1303,15 @@ void processSync()
                          entry->type);
             }
             syncFile = entry;
-            // Resume from the app's offset, seeding the running CRC with the app's
-            // CRC over the bytes it already has. seq always restarts at 0 for the
-            // request, so the app appends this stream onto its held prefix.
             syncFileOffset = syncRequestedOffset;
-            syncFileSeq = 0;
-            syncFileCrc = syncRequestedCrc;
+            // Keep the independent running CRC only when the app resumes from exactly where the last
+            // window ended on the same file (it received that window in full). Otherwise re-seed from
+            // the app's crcSeed over the prefix it actually holds.
+            bool continues = (syncRequestedFileId == syncFileSentId && syncRequestedOffset == syncFileSentOffset &&
+                              syncRequestedOffset > 0);
+            if (!continues) {
+                syncFileCrc = syncRequestedCrc;
+            }
             syncFileGen = syncRequestedGen;
             syncFileCongestion = 0;
             syncState = SYNC_SENDING_FILE;
@@ -1309,49 +1364,99 @@ void processSync()
     }
 
     if (syncState == SYNC_SENDING_FILE && syncFile != nullptr) {
-        // Stop-and-wait: emit EXACTLY ONE packet per GET_FILE, then go idle and wait for
-        // the app to request the next offset. This is the issue #74 fix. BLE notifications
-        // are not a reliable bulk-transfer primitive here: when the device pushes several
-        // notifications back-to-back, the central (react-native-ble-plx on Android, and the
-        // NimBLE TX path) drops all but the LAST one — every multi-chunk burst we tried
-        // (delay 0/15/50 ms, windows of 8) delivered only the final packet. The one packet
-        // that immediately precedes going idle DOES arrive reliably, so we make every chunk
-        // that packet. The app paces by acknowledging each one with the next GET_FILE.
-        size_t payloadMax = syncMaxValue() - 8; // [type][u32 id][u16 seq][u8 gen]
+        // Windowed transfer: send up to syncRequestedWindow chunks for this GET_FILE, then go idle
+        // and wait for the next request. See the "Sync protocol" comment block in config.h. The
+        // chunk header is [type][u32 id][u16 seq][u8 gen][u8 wcount] = 9 bytes.
+        size_t payloadMax = syncMaxValue() - 9;
         if (payloadMax > SYNC_CHUNK_PAYLOAD_MAX) {
             payloadMax = SYNC_CHUNK_PAYLOAD_MAX; // cap below the MTU; full-MTU notifications get dropped
         }
         if (syncFileOffset >= syncFile->size) {
+            // EOF: a separate one-packet FILE_END (never bundled into a data window, so the front
+            // data chunk stays the last packet on the wire — see the reverse-send rationale below).
             syncTxBuffer[0] = SYNC_PKT_FILE_END;
             memcpy(&syncTxBuffer[1], &syncFile->id, 4);
             memcpy(&syncTxBuffer[5], &syncFileCrc, 4);
             syncTxBuffer[9] = syncFileGen;
             syncNotify(10);
-            SYNC_LOG("file %lu FILE_END sent (%lu bytes, crc=%08lx)",
+            SYNC_LOG("file %lu FILE_END sent (%lu bytes, crc=%08lx, congestion=%lu)",
                      (unsigned long) syncFile->id,
                      (unsigned long) syncFile->size,
-                     (unsigned long) syncFileCrc);
+                     (unsigned long) syncFileCrc,
+                     (unsigned long) syncFileCongestion);
+            syncFileSentOffset = syncFileOffset;
+            syncFileSentId = syncFile->id;
             syncFile = nullptr;
             syncState = SYNC_IDLE;
         } else {
-            int n = storage_read_file(syncFile->path, syncFileOffset, &syncTxBuffer[8], payloadMax);
-            if (n <= 0) {
-                SYNC_LOG("file %lu -> ERROR (SD read failed at offset %lu, n=%d)",
-                         (unsigned long) syncFile->id,
-                         (unsigned long) syncFileOffset,
-                         n);
+            uint32_t remaining = syncFile->size - syncFileOffset;
+            // Clamp to the window BEFORE narrowing: a large file has far more than 65535 chunks left,
+            // so casting the raw count to uint16_t first would truncate. syncRequestedWindow is small.
+            uint32_t fullChunks = (remaining + payloadMax - 1) / payloadMax;
+            uint16_t chunks = (fullChunks > syncRequestedWindow) ? syncRequestedWindow : (uint16_t) fullChunks;
+            if (chunks < 1) {
+                chunks = 1;
+            }
+            // Read the window forward so the running CRC folds in offset order, staging each payload.
+            uint16_t lens[SYNC_WINDOW_CHUNKS_MAX];
+            bool readOk = true;
+            for (uint16_t i = 0; i < chunks; i++) {
+                uint32_t off = syncFileOffset + (uint32_t) i * payloadMax;
+                size_t want = payloadMax;
+                if (off + want > syncFile->size) {
+                    want = syncFile->size - off;
+                }
+                int n = storage_read_file(syncFile->path, off, &syncWindowBuf[(size_t) i * payloadMax], want);
+                if (n <= 0) {
+                    SYNC_LOG("file %lu -> ERROR (SD read failed at offset %lu, n=%d)",
+                             (unsigned long) syncFile->id,
+                             (unsigned long) off,
+                             n);
+                    readOk = false;
+                    break;
+                }
+                lens[i] = (uint16_t) n;
+                syncFileCrc = esp_rom_crc32_le(syncFileCrc, &syncWindowBuf[(size_t) i * payloadMax], n);
+                if ((size_t) n < want) {
+                    chunks = (uint16_t) (i + 1); // short read: end the window here, resume next request
+                    break;
+                }
+            }
+            if (!readOk) {
                 syncSendFileError(syncFile->id);
             } else {
-                syncTxBuffer[0] = SYNC_PKT_CHUNK;
-                memcpy(&syncTxBuffer[1], &syncFile->id, 4);
-                memcpy(&syncTxBuffer[5], &syncFileSeq, 2);
-                syncTxBuffer[7] = syncFileGen;
-                syncNotify(8 + n);
-                syncFileCrc = esp_rom_crc32_le(syncFileCrc, &syncTxBuffer[8], n);
-                syncFileOffset += n;
-                syncFileSeq++;
+                // Notify in REVERSE seq order (W-1 .. 0) so the front chunk (seq 0) is the last packet
+                // on the wire. If the central drops a back-to-back burst down to its last packet (#74),
+                // the survivor is the front chunk, so the app always advances by at least one chunk —
+                // never worse than the old W=1 path. Each notify is paced on the TX-buffer drain
+                // (syncNotify's congestion result), not a blind delay; resend the same packet a bounded
+                // number of times so a wedged link can't spin the loop forever.
+                uint32_t windowBytes = 0;
+                for (int i = (int) chunks - 1; i >= 0; i--) {
+                    syncTxBuffer[0] = SYNC_PKT_CHUNK;
+                    memcpy(&syncTxBuffer[1], &syncFile->id, 4);
+                    uint16_t seq = (uint16_t) i;
+                    memcpy(&syncTxBuffer[5], &seq, 2);
+                    syncTxBuffer[7] = syncFileGen;
+                    syncTxBuffer[8] = (uint8_t) chunks;
+                    memcpy(&syncTxBuffer[9], &syncWindowBuf[(size_t) i * payloadMax], lens[i]);
+                    int attempts = 0;
+                    while (!syncNotify(9 + lens[i])) {
+                        syncFileCongestion++;
+                        if (++attempts >= 8) {
+                            break; // give up on this packet; the app re-pulls the gap from its offset
+                        }
+                        delay(SYNC_CONGESTION_BACKOFF_MS);
+                    }
+                }
+                for (uint16_t i = 0; i < chunks; i++) {
+                    windowBytes += lens[i];
+                }
+                syncFileOffset += windowBytes;
+                syncFileSentOffset = syncFileOffset;
+                syncFileSentId = syncFile->id;
             }
-            // One packet sent (or read error): go idle. The app pulls the next offset.
+            // Window sent (or read error): go idle. The app pulls the next offset.
             syncFile = nullptr;
             syncState = SYNC_IDLE;
         }
@@ -1642,9 +1747,6 @@ void setup_app()
     // Setup button interrupt
     attachInterrupt(digitalPinToInterrupt(POWER_BUTTON_PIN), buttonISR, CHANGE);
 
-    // Calibrate the copper-foil touch sensor
-    setupTouch();
-
     // Boot blink runs synchronously here because the LED pin doubles as the
     // SD chip select: once storage_init() mounts the card the LED is hands-off
     // (updateLED no-ops), so the async LED_BOOT_SEQUENCE would never show.
@@ -1654,6 +1756,13 @@ void setup_app()
 
     // Fixed CPU frequency from config.h (mic clock requires >= 80MHz)
     setCpuFrequencyMhz(NORMAL_CPU_FREQ_MHZ);
+
+    // Calibrate the copper-foil touch sensor AFTER locking the CPU frequency: the
+    // v2 touch driver derives its measurement/filter timing from the clock at
+    // config time, so configuring it at the boot default (240MHz) and then dropping
+    // to 80MHz left the smooth/benchmark filters saturated (0x3FFFFF) and active
+    // detection dead. Configuring it at the final 80MHz keeps the filters valid.
+    setupTouch();
 
     configure_ble();
     // Probe the camera at boot to surface wiring/PSRAM faults early, then power

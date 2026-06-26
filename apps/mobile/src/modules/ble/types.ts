@@ -5,6 +5,14 @@
 export interface BleCharacteristic {
   read(): Promise<Uint8Array>;
   write(data: Uint8Array): Promise<void>;
+  /**
+   * Write without waiting for a GATT response. Cheaper than write() (no
+   * round-trip ACK), so it's the right choice for high-rate control writes
+   * whose loss is already self-healed at a higher layer (e.g. the sync
+   * GET_FILE pacing, which re-pulls on timeout). Falls back to write() on
+   * platforms/characteristics that don't support it.
+   */
+  writeWithoutResponse(data: Uint8Array): Promise<void>;
   /** Subscribe to NOTIFY/INDICATE updates. Returns an unsubscribe function. */
   subscribe(callback: (data: Uint8Array) => void): Promise<() => void>;
 }

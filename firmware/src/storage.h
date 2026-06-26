@@ -47,8 +47,13 @@ bool storage_save_photo(const uint8_t *jpeg, size_t len, uint8_t orientation);
 
 // --- Sync support ------------------------------------------------------------
 // Builds the manifest into `entries` (caller-allocated, PSRAM) excluding the
-// currently-open utterance file. Returns the entry count.
-int storage_build_manifest(manifest_entry_t *entries, int maxEntries);
+// currently-open utterance file. Returns the entry count. The whole scan is one
+// blocking call that can take seconds on a card with thousands of files (or a
+// bloated FAT directory), so `onProgress` (if non-null) is invoked roughly every
+// STORAGE_MANIFEST_PROGRESS_FILES files with the count scanned so far — the BLE
+// sync uses it to emit a keep-alive so the app's manifest timer doesn't expire
+// during the scan.
+int storage_build_manifest(manifest_entry_t *entries, int maxEntries, void (*onProgress)(int scanned));
 // Reads `len` bytes at `offset`; returns bytes actually read, < 0 on error.
 // The transfer CRC32 is accumulated by the caller as it streams chunks.
 int storage_read_file(const char *path, uint32_t offset, uint8_t *buf, size_t len);

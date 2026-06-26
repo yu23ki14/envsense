@@ -110,6 +110,15 @@ class NativeBleCharacteristic implements BleCharacteristic {
     );
   }
 
+  async writeWithoutResponse(data: Uint8Array): Promise<void> {
+    const b64 = fromByteArray(data);
+    await this.device.writeCharacteristicWithoutResponseForService(
+      this.serviceUuid,
+      this.charUuid,
+      b64,
+    );
+  }
+
   async subscribe(callback: (data: Uint8Array) => void): Promise<() => void> {
     const sub = this.device.monitorCharacteristicForService(
       this.serviceUuid,

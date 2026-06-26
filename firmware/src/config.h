@@ -176,14 +176,27 @@ typedef enum {
 // SYNC TRANSFER - bulk file transfer to the app over BLE (see SYNC_* UUIDs)
 // =============================================================================
 #define SYNC_MANIFEST_MAX_ENTRIES 2048 // Manifest table in PSRAM (~1 day of photos + utterances)
+// Emit a manifest keep-alive (0-entry packet) every this many files while scanning the SD directory.
+// The full scan is one blocking call (storage_build_manifest) that can take seconds with thousands of
+// files / a bloated FAT directory; without these the app sees no packet and its manifest timer expires.
+#define STORAGE_MANIFEST_PROGRESS_FILES 128
 // Delete-all (PURGE) reformats the card (storage_format) -- O(1) regardless of file
 // count and it resets FAT directory bloat. Set to 1 for a ONE-SHOT recovery flash
 // to wipe a card too bloated to even scan at boot, then set back to 0.
 #define STORAGE_FORMAT_ON_BOOT 0
-// File transfer is stop-and-wait: one packet per GET_FILE (see SYNC_PKT_FILE_END comment). These two
-// only pace the MANIFEST stream now (small: a handful of packets), not the file chunks.
+// File transfer is windowed: each GET_FILE may pull up to SYNC_WINDOW_CHUNKS_MAX chunks (see the
+// "Sync protocol" comment block below). These two only pace the MANIFEST stream (small: a handful
+// of packets), not the file chunks.
 #define SYNC_CHUNKS_PER_LOOP 8 // Manifest entries' packets attempted per loop_app() pass
 #define SYNC_CHUNK_DELAY_MS 4  // Inter-packet pause while streaming the manifest
+// Max chunks the device will send per GET_FILE window. The app picks the actual window per request
+// (GET_FILE byte 14) and the device clamps it to this. The window is the throughput lever: one
+// cheap write-without-response GET_FILE now pulls several chunks instead of one. It is bounded by
+// the #74 failure mode (the central kept only the LAST of a back-to-back notification burst), which
+// the protocol is now robust to: chunks are sent in REVERSE seq order so the front chunk (seq 0) is
+// the last on the wire and always lands, guaranteeing forward progress even if the window collapses
+// to one delivered packet. Raise gradually and retest on real iOS + Android before trusting >2.
+#define SYNC_WINDOW_CHUNKS_MAX 8
 // Max chunk PAYLOAD bytes, capped below the ATT MTU. A full MTU-sized notification (514 B at MTU
 // 517) was silently dropped by the central on this link; only packets ≲345 B arrived reliably
 // (the 326 B manifest packet, partial last chunks, FILE_END). Likely no BLE Data Length Extension,
@@ -260,7 +273,7 @@ typedef enum {
 // SYNC_CONTROL (write): [cmd, ...]
 #define SYNC_CMD_MANIFEST 0x01 // [cmd] -> manifest entries stream over SYNC_DATA
 #define SYNC_CMD_GET_FILE                                                                                              \
-    0x02 // [cmd][u32 fileId]([u32 offset][u32 crcSeed][u8 gen]) -> file chunks stream over SYNC_DATA.
+    0x02 // [cmd][u32 fileId]([u32 offset][u32 crcSeed][u8 gen][u8 window]) -> file chunks stream over SYNC_DATA.
          // The trailing offset+crcSeed are optional (legacy 5-byte form = 0/0): they let the app
          // resume a partially-received file after a reconnect. offset = bytes already held by the
          // app; crcSeed = the app's running CRC32 over those bytes (the FILE_END crc still covers
@@ -268,6 +281,8 @@ typedef enum {
          // gen (optional, byte 13) is a request generation the device echoes in every CHUNK/FILE_END
          // (see below) so the app can discard stragglers from a previous GET_FILE that are still
          // draining through the BLE pipeline when a new request starts. Omitted (<14 bytes) = 0.
+         // window (optional, byte 14) is how many chunks the app wants in this one request, clamped
+         // to SYNC_WINDOW_CHUNKS_MAX. Omitted (<15 bytes) = 1 (legacy stop-and-wait).
 #define SYNC_CMD_ACK_FILE 0x03 // [cmd][u32 fileId] -> file verified by the app; delete from SD
 #define SYNC_CMD_ABORT 0x04    // [cmd] -> stop the current transfer
 #define SYNC_CMD_PURGE 0x05    // [cmd] -> delete ALL unsynced files without transferring
@@ -275,16 +290,25 @@ typedef enum {
 // SYNC_DATA (notify): first byte is the packet type
 #define SYNC_PKT_MANIFEST_END 0x00 // [type][u16 entryCount]
 #define SYNC_PKT_MANIFEST 0x01 // [type][u8 n] then n * ([u32 id][u8 fileType][u32 size][u64 epochMs][u8 orientation])
-#define SYNC_PKT_CHUNK 0x02    // [type][u32 id][u16 seq][u8 gen][payload...] (seq is always 0: one chunk per request)
+#define SYNC_PKT_CHUNK 0x02    // [type][u32 id][u16 seq][u8 gen][u8 wcount][payload...]
 #define SYNC_PKT_FILE_END 0x03 // [type][u32 id][u32 crc32(IEEE)][u8 gen]
-// File transfer is STOP-AND-WAIT: the device sends exactly ONE packet per GET_FILE (one CHUNK, or
-// FILE_END at EOF), then goes idle and waits for the app to request the next offset. This is the
-// issue #74 fix. BLE notifications are not a reliable bulk-transfer primitive here: when the device
-// pushes notifications back-to-back, the central (react-native-ble-plx on Android, and the NimBLE TX
-// path) drops all but the LAST — every multi-chunk burst we tried (delay 0/15/50 ms, 8-chunk windows)
-// delivered only the final packet. The single packet that immediately precedes going idle DOES arrive
-// reliably, so every chunk is made that packet and the app paces by acknowledging each with the next
-// GET_FILE(offset). 0x04 is reserved (was a multi-chunk window-end marker, dropped with windowing).
+// File transfer is WINDOWED. A GET_FILE(offset, window=W) pulls up to W chunks, then the device goes
+// idle and waits for the next request; the app paces by issuing the next GET_FILE(offset). Within a
+// window the chunks cover offset, offset+payload, ... with seq 0..W-1, and wcount = the number of
+// chunks in this window (so the app knows when it has them all without waiting for a timeout). EOF is
+// still a separate FILE_END on a GET_FILE(offset==size); the device does not bundle it into a data
+// window.
+//
+// This is the issue #74-aware redesign of the old stop-and-wait (W=1) path. BLE notifications are not
+// a reliable bulk primitive here: pushing notifications back-to-back, the central (react-native-ble-plx
+// on Android, and the NimBLE TX path) dropped all but the LAST — every earlier multi-chunk attempt
+// (delay 0/15/50 ms, 8-chunk windows) delivered only the final packet. Two things make windowing safe
+// now: (1) the device paces each notify on the TX-buffer drain (syncNotify congestion result), not a
+// blind delay, killing the device-side drop; (2) chunks are sent in REVERSE seq order (W-1 first, seq 0
+// last) so the front chunk is the last on the wire and always lands — even if the whole window
+// collapses to one delivered packet, the app advances by one chunk, never worse than W=1. The app fills
+// received chunks by seq and appends the contiguous run from the front, re-pulling any gap from the new
+// offset. 0x04 is reserved (was a multi-chunk window-end marker).
 #define SYNC_PKT_ERROR 0x7F // [type][u32 id] -- requested file unavailable
 #define SYNC_MANIFEST_ENTRY_BYTES 18
 #define SYNC_FILE_TYPE_AUDIO 0
@@ -367,25 +391,23 @@ typedef enum {
 // Hold the foil for TOUCH_HOLD_OFF_MS to power off; touching it again wakes
 // the device from deep sleep (the power button keeps working for both too).
 // =============================================================================
+// Driven by the IDF v2 touch sensor driver (esp_driver_touch_sens). The driver
+// maintains the benchmark and raises active/inactive events; deep-sleep wake is
+// supported natively (the legacy touch_pad_* driver's sleep FSM is dead on the S3
+// under IDF 5.5). On the S3 the channel id equals the GPIO number (GPIO3 == ch3).
 #define TOUCH_SENSE_PIN 3      // GPIO3 (D2) - copper foil capacitive pad
 #define TOUCH_HOLD_OFF_MS 2000 // Hold duration to power off (same as button long press)
-#define TOUCH_TOUCH_RATIO                                                                                              \
-    0.05f                           // Enter touched state when filtered > baseline * (1 + ratio).
-                                    // Kept low because on battery the device ground floats and the
-                                    // touch delta shrinks to a fraction of the USB-powered value.
-#define TOUCH_RELEASE_RATIO 0.025f  // Leave touched state when filtered < baseline * (1 + ratio)
-#define TOUCH_FILTER_SAMPLES 5      // Raw reads per poll; the median rejects single-sample noise
-#define TOUCH_BASELINE_SAMPLES 16   // Boot-time calibration sample count (foil must be untouched)
-#define TOUCH_BASELINE_ALPHA 0.005f // Baseline EMA rate for downward drift (~10s at 50ms poll)
-#define TOUCH_BASELINE_ALPHA_UP                                                                                        \
-    0.0005f // Upward drift tracked 10x slower so a sub-threshold touch
-            // (small battery-powered delta) is not absorbed as baseline
-#define TOUCH_MEASURE_CYCLES                                                                                           \
-    2000                            // Touch FSM charge cycles per read (S3 default 500); longer
-                                    // integration = better SNR, which the low thresholds rely on
-#define TOUCH_SLEEP_CYCLES 0x0F     // Interval between HW measurements (S3 default)
-#define TOUCH_SAMPLE_INTERVAL_MS 50 // Polling interval in the main loop
-#define TOUCH_DEBUG_LOG 0           // 1: log raw values every second + LED mirrors touch state (calibration)
+#define TOUCH_CHARGE_TIMES                                                                                             \
+    2000 // Charge/discharge times per measurement. Higher = larger reading scale and better SNR.
+         // The read value is positively correlated to this; active_thresh is on the same scale.
+         // 2000 (vs the IDF example's 500) matches the sensitivity the legacy driver needed for
+         // this battery-powered floating-ground foil.
+#define TOUCH_ACTIVE_THRESH                                                                                            \
+    2000                  // Relative active threshold: the channel is "touched" when (smooth - benchmark) exceeds
+                          // this. Same threshold also wakes the chip from deep sleep. Tune on-device with
+                          // TOUCH_DEBUG_LOG (watch the touched-vs-released delta); on battery the floating ground
+                          // shrinks the delta, so keep this comfortably below the released-finger delta.
+#define TOUCH_DEBUG_LOG 1 // 1: log raw/smooth/benchmark/delta every second + LED mirrors touch state
 
 // Power Button States
 typedef enum { BUTTON_IDLE, BUTTON_PRESSED, BUTTON_LONG_PRESS, BUTTON_RELEASED } button_state_t;

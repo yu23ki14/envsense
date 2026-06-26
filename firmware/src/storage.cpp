@@ -100,10 +100,12 @@ bool storage_init()
         sdMutex = xSemaphoreCreateMutex();
     }
 
+    Serial.println("storage: SD.begin()...");
     if (!SD.begin(SD_CS_PIN, SPI, SD_SPI_FREQ_HZ)) {
         Serial.println("storage: no SD card found - falling back to live streaming");
         return false;
     }
+    Serial.println("storage: SD.begin() OK");
 
     flushBuffer = (uint8_t *) ps_malloc(STORAGE_FLUSH_BYTES + OPUS_OUTPUT_MAX_BYTES + 2);
     if (flushBuffer == nullptr) {
@@ -121,14 +123,19 @@ bool storage_init()
     return storage_format();
 #endif
 
+    Serial.println("storage: mkdir...");
     SD.mkdir(AUDIO_DIR);
     SD.mkdir(PHOTO_DIR);
 
     audioFileCount = 0;
     photoFileCount = 0;
     unsyncedBytes = 0;
+    Serial.println("storage: scanDir(audio)...");
     scanDir(AUDIO_DIR, &audioFileCount, &unsyncedBytes);
+    Serial.printf("storage: scanDir(audio) done (%u files)\n", audioFileCount);
+    Serial.println("storage: scanDir(photo)...");
     scanDir(PHOTO_DIR, &photoFileCount, &unsyncedBytes);
+    Serial.printf("storage: scanDir(photo) done (%u files)\n", photoFileCount);
 
     sdAvailable = true;
     Serial.printf("storage: SD mounted (%llu MB), unsynced: %u audio / %u photo / %lu bytes\n",
@@ -359,13 +366,25 @@ bool storage_save_photo(const uint8_t *jpeg, size_t len, uint8_t orientation)
 
 // --- Sync support ------------------------------------------------------------
 
-static int addManifestDir(const char *dir, uint8_t type, manifest_entry_t *entries, int count, int maxEntries)
+static int addManifestDir(const char *dir,
+                          uint8_t type,
+                          manifest_entry_t *entries,
+                          int count,
+                          int maxEntries,
+                          void (*onProgress)(int scanned),
+                          int *sinceProgress)
 {
     File root = SD.open(dir);
     if (!root) {
         return count;
     }
     for (File f = root.openNextFile(); f && count < maxEntries; f = root.openNextFile()) {
+        // Count every directory entry walked (not just kept files) toward the keep-alive cadence:
+        // a bloated FAT directory is slow precisely because of the entries we skip.
+        if (onProgress != nullptr && ++(*sinceProgress) >= STORAGE_MANIFEST_PROGRESS_FILES) {
+            *sinceProgress = 0;
+            onProgress(count);
+        }
         if (f.isDirectory()) {
             f.close();
             continue;
@@ -388,14 +407,15 @@ static int addManifestDir(const char *dir, uint8_t type, manifest_entry_t *entri
     return count;
 }
 
-int storage_build_manifest(manifest_entry_t *entries, int maxEntries)
+int storage_build_manifest(manifest_entry_t *entries, int maxEntries, void (*onProgress)(int scanned))
 {
     if (!sdAvailable) {
         return 0;
     }
     lock();
-    int count = addManifestDir(AUDIO_DIR, SYNC_FILE_TYPE_AUDIO, entries, 0, maxEntries);
-    count = addManifestDir(PHOTO_DIR, SYNC_FILE_TYPE_PHOTO, entries, count, maxEntries);
+    int sinceProgress = 0;
+    int count = addManifestDir(AUDIO_DIR, SYNC_FILE_TYPE_AUDIO, entries, 0, maxEntries, onProgress, &sinceProgress);
+    count = addManifestDir(PHOTO_DIR, SYNC_FILE_TYPE_PHOTO, entries, count, maxEntries, onProgress, &sinceProgress);
     unlock();
     return count;
 }

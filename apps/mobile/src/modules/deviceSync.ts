@@ -26,7 +26,7 @@ const SYNC_PKT_MANIFEST_END = 0x00;
 const SYNC_PKT_MANIFEST = 0x01;
 const SYNC_PKT_CHUNK = 0x02;
 const SYNC_PKT_FILE_END = 0x03;
-// 0x04 (旧 WINDOW_END) は予約。stop-and-wait では使わない。
+// 0x04 (旧 WINDOW_END) は予約。窓化では wcount をチャンクに載せるため使わない。
 const SYNC_PKT_ERROR = 0x7f;
 
 const SYNC_FLAG_SD_OK = 0x01;
@@ -37,14 +37,25 @@ const SYNC_MANIFEST_ENTRY_BYTES = 18;
 const FILE_TYPE_AUDIO = 0;
 const FILE_TYPE_PHOTO = 1;
 
-// GET_FILE を送ってから応答（チャンク or FILE_END）がこれだけ来なければ失敗とみなして再要求する。
-// この無音窓は firmware の SYNC_ACTIVE_IDLE_MS(=6000, config.h) より必ず短く保つこと。逆転すると、
-// 応答待ちの間にファームが「同期終了」と誤判定して capture（PDMマイク + 定期撮影）を再開し、
-// カメラ起動中に BLE が切れる（issue #74）。stop-and-wait の 1 往復は通常 1 秒未満なので 3 秒で十分。
+// GET_FILE を送ってから次のパケット（チャンク or FILE_END）がこれだけ来なければ失敗とみなして
+// 再要求する。窓内では 1 パケットごとにこのタイマを張り直す。この無音窓は firmware の
+// SYNC_ACTIVE_IDLE_MS(=6000, config.h) より必ず短く保つこと。逆転すると、応答待ちの間にファームが
+// 「同期終了」と誤判定して capture（PDMマイク + 定期撮影）を再開し、カメラ起動中に BLE が切れる
+// （issue #74）。1 窓の往復は通常 1 秒未満なので 3 秒で十分。
 const PACKET_TIMEOUT_MS = 3000;
-// 1 ファイルの転送で「1 チャンク進むごとにリセット」する無進捗カウントの上限。これを超えたら
+// マニフェスト取得専用のタイムアウト。デバイスは要求を受けると SD 全件をスキャンしてから最初の
+// パケットを返すため、ファイル数が多い／FAT ディレクトリが肥大していると無音区間が数秒に及ぶ。
+// firmware はスキャン中 STORAGE_MANIFEST_PROGRESS_FILES 件ごとに 0 件パケットで keep-alive を送る
+// （その都度このタイマを張り直す）ので、keep-alive 間隔（通常 1 秒未満）より十分長く、かつ
+// keep-alive が数回連続ドロップしても耐える余裕を持たせる。
+const MANIFEST_PACKET_TIMEOUT_MS = 10000;
+// 1 ファイルの転送で「1 窓で 1 バイトでも進めばリセット」する無進捗カウントの上限。これを超えたら
 // そのファイルはスキップ（次回の同期で再挑戦）。全取りこぼし or タイムアウトが連続した回数。
 const MAX_WINDOW_STALLS = 5;
+// 1 回の GET_FILE でまとめて要求するチャンク数（窓サイズ）。1 = 旧 stop-and-wait。firmware の
+// SYNC_WINDOW_CHUNKS_MAX 以下であること。逆順送信のおかげで最悪でも 1 窓 1 チャンクは前進するので
+// W=1 より遅くなることはなく、ドロップが少ないリンクほど最大 W 倍速くなる。実機計測しながら上げる。
+const SYNC_WINDOW_CHUNKS = 2;
 // 同期開始時、ABORT 後に BLE パイプラインの残骸チャンクが流れ切るのを待つ窓。
 const DRAIN_MS = 250;
 // これより古いタイムスタンプは「時計未設定のまま記録された」ファイル
@@ -249,15 +260,24 @@ function controlPacket(cmd: number, fileId?: number): Uint8Array {
  * gen はこのリクエストの世代番号。デバイスは各 CHUNK/FILE_END にそのまま乗せ返すので、
  * 直前の GET_FILE が BLE パイプラインに残した取りこぼしチャンク（接続スコープの同じ id を
  * 持つ）を gen 不一致で確実に捨てられる。
+ * window はこの 1 リクエストで送ってほしいチャンク数（窓サイズ）。デバイスは offset, offset+payload,
+ * … を seq 0..window-1 で、front が最後に届くよう逆順送信する。
  */
-function getFilePacket(fileId: number, offset: number, crcSeed: number, gen: number): Uint8Array {
-  const packet = new Uint8Array(14);
+function getFilePacket(
+  fileId: number,
+  offset: number,
+  crcSeed: number,
+  gen: number,
+  window: number,
+): Uint8Array {
+  const packet = new Uint8Array(15);
   packet[0] = SYNC_CMD_GET_FILE;
   const dv = new DataView(packet.buffer);
   dv.setUint32(1, fileId, true);
   dv.setUint32(5, offset >>> 0, true);
   dv.setUint32(9, crcSeed >>> 0, true);
   packet[13] = gen & 0xff;
+  packet[14] = window & 0xff;
   return packet;
 }
 
@@ -319,12 +339,12 @@ class SyncChannel {
       };
       const arm = () => {
         if (timer != null) clearTimeout(timer);
-        timer = setTimeout(() => fail('Manifest transfer timed out'), PACKET_TIMEOUT_MS);
+        timer = setTimeout(() => fail('Manifest transfer timed out'), MANIFEST_PACKET_TIMEOUT_MS);
       };
       this.handler = (packet) => {
         const type = packet[0];
         if (type === SYNC_PKT_MANIFEST) {
-          arm();
+          arm(); // 0 件の keep-alive パケットでもここに来てタイマを張り直す
           const count = packet[1] ?? 0;
           const v = view(packet);
           for (let i = 0; i < count; i++) {
@@ -355,15 +375,20 @@ class SyncChannel {
   }
 
   /**
-   * 1 ウィンドウ分（最大 SYNC_WINDOW_CHUNKS チャンク）を受信する。GET_FILE(offset) を 1 回送り、
-   * デバイスは最大 W チャンクを送って WINDOW_END（まだ続く）か FILE_END（最後）で停止する。
-   * BLE 通知は連続 push すると送受信スタック両方で落ちる（issue #74）ので、デバイスが窓ごとに
-   * 停止し、アプリがこのメソッドを繰り返し呼んで次の窓を引く＝フロー制御になっている。
+   * 1 ウィンドウ分（最大 SYNC_WINDOW_CHUNKS チャンク）を受信する。GET_FILE(offset, window=W) を
+   * 1 回だけ応答なし書き込みで送り、デバイスは offset, offset+payload, … を seq 0..W-1 で、front
+   * （seq 0）が最後に電波に乗るよう逆順送信して停止する。各チャンクは wcount（窓内チャンク数）を
+   * 載せるので、全部揃ったらタイムアウトを待たずに確定できる。
    *
-   * 受信バイトは partial.buffer / partial.offset に積み上げる。戻り値:
+   * BLE 通知は連続 push すると送受信スタック両方で最後の 1 個以外が落ちることがある（issue #74）。
+   * 逆順送信のおかげで、最悪 front だけが届いても partial.offset は 1 チャンク前進するので、旧
+   * stop-and-wait（W=1）より遅くなることはない。受信したチャンクは seq でまとめ、先頭から連続する
+   * 分だけ実バイト長で partial.buffer に積む。欠落で途切れた seq 以降は捨て、次の窓で partial.offset
+   * から再要求して回収する。
+   *
+   * 戻り値:
    *  - { done: true }  全体完了（サイズ一致 + CRC 検証 OK）。
-   *  - { done: false } まだ続く（WINDOW_END、または欠落で未完の FILE_END）。呼び出し側が再要求する。
-   * 取りこぼした seq は黙ってスキップし、その分は次の窓で partial.offset から再要求して回収する。
+   *  - { done: false } まだ続く（窓を引き切った／欠落で未完の FILE_END／タイムアウト）。呼び出し側が再要求する。
    * CRC 不一致のときだけ partial.offset を 0 に戻し（reject）、頭から取り直させる。
    */
   fetchWindow(
@@ -374,8 +399,18 @@ class SyncChannel {
     return new Promise<{ done: boolean }>((resolve, reject) => {
       const buffer = partial.buffer;
       const gen = allocSyncGen();
+      // seq -> payload。逆順・取りこぼしを許容するため一旦ためてから先頭から連結する。
+      const received = new Map<number, Uint8Array>();
+      let wcount = Number.POSITIVE_INFINITY; // 最初のチャンクで確定
+      let settled = false;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      const arm = () => {
+        if (timer != null) clearTimeout(timer);
+        timer = setTimeout(() => finish(null), PACKET_TIMEOUT_MS);
+      };
       const fail = (message: string) => {
+        if (settled) return;
+        settled = true;
         if (timer != null) clearTimeout(timer);
         this.handler = null;
         this.log(
@@ -383,9 +418,45 @@ class SyncChannel {
         );
         reject(new Error(message));
       };
-      const arm = () => {
+      // 窓の確定: 先頭 seq から連続する分だけ実バイト長で積み、結果を返す。fileEndCrc が
+      // 渡されたら EOF 確認込みで判定する（タイムアウト時は null）。
+      const finish = (fileEndCrc: number | null) => {
+        if (settled) return;
+        settled = true;
         if (timer != null) clearTimeout(timer);
-        timer = setTimeout(() => fail(`File ${entry.id} window timed out`), PACKET_TIMEOUT_MS);
+        this.handler = null;
+        for (let seq = 0; received.has(seq); seq++) {
+          const payload = received.get(seq) as Uint8Array;
+          if (partial.offset + payload.length > buffer.length) {
+            // settled は立てたが reject 経路へ。fail() は settled で弾かれるので直接 reject。
+            this.log(`file ${entry.id} overflow at seq ${seq}`);
+            reject(new Error(`File ${entry.id} overflow at seq ${seq}`));
+            return;
+          }
+          buffer.set(payload, partial.offset);
+          partial.offset += payload.length;
+          partial.crc = crc32Append(partial.crc, payload);
+          onChunk(payload.length);
+        }
+        if (fileEndCrc != null) {
+          if (partial.offset !== entry.size) {
+            // 取りこぼしで未完。reject せず再要求させる（partial.offset から続行）。
+            this.log(
+              `file ${entry.id} FILE_END incomplete ${partial.offset}/${entry.size} -> re-pull`,
+            );
+            resolve({ done: false });
+          } else if (partial.crc !== fileEndCrc) {
+            partial.offset = 0; // 壊れているので部分を捨て、頭から取り直す
+            partial.crc = 0;
+            this.log(`file ${entry.id} CRC mismatch (${entry.size} bytes)`);
+            reject(new Error(`File ${entry.id} failed CRC check`));
+          } else {
+            this.log(`file ${entry.id} OK (${entry.size} bytes)`);
+            resolve({ done: true });
+          }
+          return;
+        }
+        resolve({ done: false }); // 窓を引き切った（まだ続く）／タイムアウト
       };
       this.handler = (packet) => {
         const type = packet[0];
@@ -403,49 +474,24 @@ class SyncChannel {
         if (type === SYNC_PKT_CHUNK) {
           if (v.getUint8(7) !== gen) return; // 前回 GET_FILE の残骸チャンク
           const seq = v.getUint16(5, true);
-          const payload = packet.subarray(8);
-          if (seq !== 0) return; // stop-and-wait は 1 リクエスト 1 チャンク。seq は常に 0。それ以外は残骸
-          if (partial.offset + payload.length > buffer.length) {
-            fail(`File ${entry.id} overflow at seq ${seq}`);
-            return;
-          }
-          // stop-and-wait: デバイスは 1 リクエスト 1 チャンクで止まる。これを受けたら
-          // CRC を継ぎ足して確定し、{done:false} で返す → 呼び出し側が次の offset を要求。
-          if (timer != null) clearTimeout(timer);
-          this.handler = null;
-          buffer.set(payload, partial.offset);
-          partial.offset += payload.length;
-          partial.crc = crc32Append(partial.crc, payload);
-          onChunk(payload.length);
-          resolve({ done: false });
+          wcount = v.getUint8(8);
+          // slice（copy）で保持する: 窓内の後続パケットを待つ間バッファを跨いで参照するため。
+          received.set(seq, packet.slice(9));
+          arm(); // パケットごとにタイムアウトを張り直す
+          if (received.size >= wcount) finish(null); // 窓が揃った → 即確定
           return;
         }
         // SYNC_PKT_FILE_END（EOF。チャンクは無く、最後の確認だけ）
         if (v.getUint8(9) !== gen) return; // 残骸 FILE_END は無視
-        if (timer != null) clearTimeout(timer);
-        this.handler = null;
-        const expectedCrc = v.getUint32(5, true);
-        if (partial.offset !== entry.size) {
-          // 取りこぼしで未完。reject せず再要求させる（partial.offset から続行）。
-          this.log(
-            `file ${entry.id} FILE_END incomplete ${partial.offset}/${entry.size} -> re-pull`,
-          );
-          resolve({ done: false });
-        } else if (partial.crc !== expectedCrc) {
-          partial.offset = 0; // 壊れているので部分を捨て、頭から取り直す
-          partial.crc = 0;
-          this.log(`file ${entry.id} CRC mismatch (${entry.size} bytes)`);
-          reject(new Error(`File ${entry.id} failed CRC check`));
-        } else {
-          this.log(`file ${entry.id} OK (${entry.size} bytes)`);
-          resolve({ done: true });
-        }
+        finish(v.getUint32(5, true));
       };
       arm();
-      // 続き（または再要求）は手元のバイトの確定 CRC32 をそのままシードに使う。
-      // stop-and-wait は 1 チャンク 1 リクエストなので、ここでは毎回ログを出さない。
+      // 続き（または再要求）は手元のバイトの確定 CRC32 をそのままシードに使う。応答なし書き込みで
+      // 往復コストを削り、取りこぼしは上のタイムアウト→再要求で自己修復する。
       this.control
-        .write(getFilePacket(entry.id, partial.offset, partial.crc, gen))
+        .writeWithoutResponse(
+          getFilePacket(entry.id, partial.offset, partial.crc, gen, SYNC_WINDOW_CHUNKS),
+        )
         .catch((err) => fail(String(err)));
     });
   }

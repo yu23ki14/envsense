@@ -18,6 +18,16 @@ class WebBleCharacteristic implements BleCharacteristic {
     await this.characteristic.writeValue(data as BufferSource);
   }
 
+  async writeWithoutResponse(data: Uint8Array): Promise<void> {
+    // Not all browsers/characteristics expose the without-response variant;
+    // fall back to the acknowledged write so callers can rely on it.
+    if (typeof this.characteristic.writeValueWithoutResponse === 'function') {
+      await this.characteristic.writeValueWithoutResponse(data as BufferSource);
+    } else {
+      await this.characteristic.writeValue(data as BufferSource);
+    }
+  }
+
   async subscribe(callback: (data: Uint8Array) => void): Promise<() => void> {
     await this.characteristic.startNotifications();
     const handler = (event: Event) => {
