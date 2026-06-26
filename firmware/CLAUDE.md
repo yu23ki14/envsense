@@ -1,6 +1,6 @@
 # firmware
 
-envsense device firmware for the XIAO ESP32S3 Sense. An Arduino sketch built with **arduino-cli**.
+envsens device firmware for the XIAO ESP32S3 Sense. An Arduino sketch built with **arduino-cli**.
 Derived from the omiGlass firmware.
 
 See `firmware/README.md` for full setup details. This file covers the structure and the things to

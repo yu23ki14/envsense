@@ -1,6 +1,6 @@
 # hardware
 
-The clip-style enclosure for envsense. The physical design of the wearable device that houses the
+The clip-style enclosure for envsens. The physical design of the wearable device that houses the
 XIAO ESP32S3 Sense + OV2640 camera + LiPo battery. It is developed as a parametric OpenSCAD design
 (Phase 1 / GitHub #2).
 

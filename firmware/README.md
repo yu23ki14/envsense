@@ -1,6 +1,6 @@
 # firmware
 
-XIAO ESP32S3 Sense 向け envsense デバイスファームウェア。Arduino スケッチで、
+XIAO ESP32S3 Sense 向け envsens デバイスファームウェア。Arduino スケッチで、
 **arduino-cli** でビルドする。omiGlass のファームから派生。
 
 ## 構成

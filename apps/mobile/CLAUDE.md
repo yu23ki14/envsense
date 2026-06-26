@@ -2,7 +2,7 @@
 
 # apps/mobile
 
-Companion mobile app for the envsense device. Expo SDK 55 / React 19 / React Native 0.83, with the
+Companion mobile app for the envsens device. Expo SDK 55 / React 19 / React Native 0.83, with the
 New Architecture enabled. Runs on three targets: iOS, Android, and web.
 
 > Expo changes a lot between versions. Before writing any Expo-related code, follow the `AGENTS.md`

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-envsense is a wearable AI-agent device with various onboard sensors. Derived from
+envsens is a wearable AI-agent device with various onboard sensors. Derived from
 [omiGlass](https://github.com/BasedHardware/omiGlass) (MIT), it is a pnpm monorepo containing a
 photo + audio capture device built on the XIAO ESP32S3 Sense and its companion mobile app.
 
